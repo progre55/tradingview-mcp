@@ -2,9 +2,10 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS } from '../connection.js';
+import { PANEL_DETECT_JS, STRATEGY_DETECTOR_JS, STRATEGY_DATA_FN, SCRAPE_PERF_SUMMARY_FN, COLLECT_TRADES_FN } from './_panels.js';
 
 const MAX_OHLCV_BARS = 500;
-const MAX_TRADES = 20;
+const MAX_TRADES = 500;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 
@@ -51,7 +52,23 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
               }
             } catch(e) {}
           }
-          if (items.length > 0) results.push({name: name, count: items.length, items: items});
+          // Push:
+          //   - any study with shapes (always — preserves the original behavior), OR
+          //   - any Pine study with no shapes yet (so an ORB outside its session
+          //     window appears as state:'loaded_no_shapes' rather than vanishing).
+          // Built-in studies (Volume, Dividends, Splits, Earnings, etc.) return
+          // s.isPine()===false and would otherwise pollute the response with
+          // empty stubs since their _primitivesCollection contains every dwg map.
+          var isPine = false;
+          try { isPine = (typeof s.isPine === 'function') && s.isPine(); } catch(e) {}
+          if (items.length > 0 || isPine) {
+            results.push({
+              name: name,
+              count: items.length,
+              items: items,
+              state: items.length > 0 ? 'has_shapes' : 'loaded_no_shapes',
+            });
+          }
         } catch(e) {}
       }
       return results;
@@ -133,86 +150,190 @@ export async function getIndicator({ entity_id }) {
 }
 
 export async function getStrategyResults() {
-  const results = await evaluate(`
+  // Path 1 (primary): read strat.reportData() directly. Non-intrusive — does
+  // not toggle the bottom panel or shift any tab. Only populates when the
+  // strategy is currently selected in the Strategy Tester for backtesting.
+  const api = await evaluate(`
     (function() {
+      ${STRATEGY_DATA_FN}
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
+        var hit = findActiveStrategy();
+        if (!hit.source || !hit.reportData) {
+          return { populated: false, source: 'internal_api', diagnostic: hit.debug, first_strategy_name: hit.first_strategy_name };
         }
-        if (!strat) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy indicator first.'};
-        var metrics = {};
-        if (strat.reportData) {
-          var rd = typeof strat.reportData === 'function' ? strat.reportData() : strat.reportData;
-          if (rd && typeof rd === 'object') {
-            if (typeof rd.value === 'function') rd = rd.value();
-            if (rd) { var keys = Object.keys(rd); for (var k = 0; k < keys.length; k++) { var val = rd[keys[k]]; if (val !== null && val !== undefined && typeof val !== 'function') metrics[keys[k]] = val; } }
-          }
-        }
-        if (Object.keys(metrics).length === 0 && strat.performance) {
-          var perf = strat.performance();
-          if (perf && typeof perf.value === 'function') perf = perf.value();
-          if (perf && typeof perf === 'object') { var pkeys = Object.keys(perf); for (var p = 0; p < pkeys.length; p++) { var pval = perf[pkeys[p]]; if (pval !== null && pval !== undefined && typeof pval !== 'function') metrics[pkeys[p]] = pval; } }
-        }
-        return {metrics: metrics, source: 'internal_api'};
-      } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message}; }
+        var mapped = mapPerformanceMetrics(hit.reportData);
+        return {
+          populated: true,
+          source: 'internal_api',
+          strategy_name: hit.name,
+          metrics: mapped.metrics,
+          long: mapped.long,
+          short: mapped.short,
+          currency: hit.reportData.currency || null,
+        };
+      } catch(e) { return { populated: false, source: 'internal_api', error: e.message }; }
     })()
   `);
-  return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {}, error: results?.error };
+
+  if (api?.populated && api.metrics && Object.keys(api.metrics).length >= 5) {
+    return {
+      success: true,
+      metric_count: Object.keys(api.metrics).length,
+      source: 'internal_api',
+      strategy_name: api.strategy_name,
+      currency: api.currency,
+      metrics: api.metrics,
+      long_metrics: api.long ? Object.keys(api.long).reduce((a, k) => { if (api.long[k] != null) a[k] = api.long[k]; return a; }, {}) : undefined,
+      short_metrics: api.short ? Object.keys(api.short).reduce((a, k) => { if (api.short[k] != null) a[k] = api.short[k]; return a; }, {}) : undefined,
+    };
+  }
+
+  // Path 2 (fallback): DOM scrape of Performance Summary. Intrusive — opens
+  // the bottom panel + activates the Metrics tab. Only fired when the API
+  // path returns no populated strategy (strategy not selected, or not on
+  // chart at all).
+  await evaluate(`
+    (function() {
+      try {
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        if (bwb && typeof bwb.showWidget === 'function') bwb.showWidget('backtesting');
+      } catch(e) {}
+    })()
+  `);
+  await new Promise(r => setTimeout(r, 400));
+  await evaluate(`
+    (function() {
+      ${PANEL_DETECT_JS}
+      var panel = findStrategyTesterContainer();
+      if (!panel) return;
+      var tabs = panel.querySelectorAll('[role="tab"], button');
+      for (var i = 0; i < tabs.length; i++) {
+        var t = (tabs[i].textContent || '').trim();
+        if (/^(metrics|performance summary|overview|summary)$/i.test(t)) {
+          var sel = tabs[i].getAttribute('aria-selected');
+          if (sel !== 'true') { try { tabs[i].click(); } catch(e) {} }
+          return;
+        }
+      }
+    })()
+  `);
+  await new Promise(r => setTimeout(r, 500));
+
+  const dom = await evaluate(`
+    (function() {
+      ${PANEL_DETECT_JS}
+      ${SCRAPE_PERF_SUMMARY_FN}
+      try { return scrapePerformanceSummary(); } catch(e) { return { found: false, reason: e.message }; }
+    })()
+  `);
+
+  if (dom?.found && dom.metrics && Object.keys(dom.metrics).length >= 5) {
+    return {
+      success: true,
+      metric_count: Object.keys(dom.metrics).length,
+      source: 'dom_scrape',
+      metrics: dom.metrics,
+      api_attempt: { populated: false, diagnostic: api?.diagnostic, first_strategy_name: api?.first_strategy_name },
+    };
+  }
+
+  // Both paths empty.
+  return {
+    success: true,
+    metric_count: 0,
+    source: 'none',
+    metrics: {},
+    error: dom?.reason || api?.error || 'no_metrics',
+    api_diagnostic: api?.diagnostic,
+    dom_attempt: dom,
+  };
 }
 
-export async function getTrades({ max_trades } = {}) {
-  const limit = Math.min(max_trades || 20, MAX_TRADES);
-  const trades = await evaluate(`
+export async function getTrades({ max_trades, settle_ms } = {}) {
+  const limit = Math.min(max_trades || 100, MAX_TRADES);
+
+  // Path 1 (primary): read strat.reportData().trades directly. Synchronous,
+  // non-intrusive (no panel open, no scrolling), returns the full list.
+  const api = await evaluate(`
     (function() {
+      ${STRATEGY_DATA_FN}
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.ordersData || s.reportData)) { strat = s; break; }
+        var hit = findActiveStrategy();
+        if (!hit.source || !hit.reportData || !hit.reportData.trades) {
+          return { populated: false, source: 'internal_api', diagnostic: hit.debug, first_strategy_name: hit.first_strategy_name };
         }
-        if (!strat) return {trades: [], source: 'internal_api', error: 'No strategy found on chart.'};
-        var orders = null;
-        if (strat.ordersData) { orders = typeof strat.ordersData === 'function' ? strat.ordersData() : strat.ordersData; if (orders && typeof orders.value === 'function') orders = orders.value(); }
-        if (!orders || !Array.isArray(orders)) {
-          if (strat._orders) orders = strat._orders;
-          else if (strat.tradesData) { orders = typeof strat.tradesData === 'function' ? strat.tradesData() : strat.tradesData; if (orders && typeof orders.value === 'function') orders = orders.value(); }
-        }
-        if (!orders || !Array.isArray(orders)) return {trades: [], source: 'internal_api', error: 'ordersData() returned non-array.'};
-        var result = [];
-        for (var t = 0; t < Math.min(orders.length, ${limit}); t++) {
-          var o = orders[t];
-          if (typeof o === 'object' && o !== null) {
-            var trade = {};
-            var okeys = Object.keys(o);
-            for (var k = 0; k < okeys.length; k++) { var v = o[okeys[k]]; if (v !== null && v !== undefined && typeof v !== 'function' && typeof v !== 'object') trade[okeys[k]] = v; }
-            result.push(trade);
-          }
-        }
-        return {trades: result, source: 'internal_api'};
-      } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
+        var rawTrades = hit.reportData.trades;
+        var projected = rawTrades.map(function(t, i) { return projectInternalTrade(t, i); });
+        return { populated: true, source: 'internal_api', strategy_name: hit.name, trades: projected, currency: hit.reportData.currency || null };
+      } catch(e) { return { populated: false, source: 'internal_api', error: e.message }; }
     })()
   `);
-  return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
+
+  if (api?.populated && Array.isArray(api.trades)) {
+    let trades = api.trades;
+    const total = trades.length;
+    if (trades.length > limit) trades = trades.slice(0, limit);
+    return {
+      success: true,
+      trade_count: trades.length,
+      total_scraped: total,
+      source: 'internal_api',
+      strategy_name: api.strategy_name,
+      currency: api.currency,
+      trades,
+    };
+  }
+
+  // Path 2 (fallback): DOM scroll-and-scrape of the virtualized ka-table.
+  // Intrusive — opens the bottom panel + activates List of Trades tab.
+  // Only fired when the internal_api path returns no populated strategy.
+  const settle = Math.max(150, Math.min(settle_ms || 350, 1500));
+  const maxScrolls = Math.min(80, Math.ceil(limit / 8) + 20);
+
+  await evaluate(`
+    (function() {
+      try {
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        if (bwb && typeof bwb.showWidget === 'function') bwb.showWidget('backtesting');
+      } catch(e) {}
+    })()
+  `);
+  await new Promise(r => setTimeout(r, 400));
+
+  const result = await evaluateAsync(`
+    (async function() {
+      ${PANEL_DETECT_JS}
+      ${COLLECT_TRADES_FN}
+      try { return await collectTrades(${maxScrolls}, ${settle}); }
+      catch(e) { return { error: e.message, trades: [] }; }
+    })()
+  `);
+
+  let trades = result?.trades || [];
+  const total = trades.length;
+  if (trades.length > limit) trades = trades.slice(0, limit);
+
+  return {
+    success: true,
+    trade_count: trades.length,
+    total_scraped: total,
+    source: result?.source || 'dom_scrape',
+    virtualized: result?.virtualized,
+    scrolls: result?.scrolls,
+    trades,
+    error: result?.error,
+    api_attempt: { populated: false, diagnostic: api?.diagnostic, first_strategy_name: api?.first_strategy_name },
+  };
 }
 
 export async function getEquity() {
   const equity = await evaluate(`
     (function() {
+      ${STRATEGY_DETECTOR_JS}
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
-        }
-        if (!strat) return {data: [], source: 'internal_api', error: 'No strategy found on chart.'};
+        var hit = findStrategySource();
+        if (!hit.source) return {data: [], source: 'internal_api', error: 'no_strategy', diagnostic: hit.debug};
+        var strat = hit.source;
         var data = [];
         if (strat.equityData) {
           var eq = typeof strat.equityData === 'function' ? strat.equityData() : strat.equityData;
@@ -359,8 +480,7 @@ export async function getStudyValues() {
 
 export async function getPineLines({ study_filter, verbose } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const raw = (await evaluate(buildGraphicsJS('dwglines', 'lines', filter))) || [];
 
   const studies = raw.map(s => {
     const hLevels = [];
@@ -374,7 +494,7 @@ export async function getPineLines({ study_filter, verbose } = {}) {
       if (y1 != null && v.y1 === v.y2 && !seen[y1]) { hLevels.push(y1); seen[y1] = true; }
     }
     hLevels.sort((a, b) => b - a);
-    const result = { name: s.name, total_lines: s.count, horizontal_levels: hLevels };
+    const result = { name: s.name, state: s.state, total_lines: s.count, horizontal_levels: hLevels };
     if (verbose) result.all_lines = allLines;
     return result;
   });
@@ -383,8 +503,7 @@ export async function getPineLines({ study_filter, verbose } = {}) {
 
 export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const raw = (await evaluate(buildGraphicsJS('dwglabels', 'labels', filter))) || [];
 
   const limit = max_labels || 50;
   const studies = raw.map(s => {
@@ -396,15 +515,14 @@ export async function getPineLabels({ study_filter, max_labels, verbose } = {}) 
       return { text, price };
     }).filter(l => l.text || l.price != null);
     if (labels.length > limit) labels = labels.slice(-limit);
-    return { name: s.name, total_labels: s.count, showing: labels.length, labels };
+    return { name: s.name, state: s.state, total_labels: s.count, showing: labels.length, labels };
   });
   return { success: true, study_count: studies.length, studies };
 }
 
 export async function getPineTables({ study_filter } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const raw = (await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter))) || [];
 
   const studies = raw.map(s => {
     const tables = {};
@@ -424,15 +542,14 @@ export async function getPineTables({ study_filter } = {}) {
       }).filter(Boolean);
       return { rows: formatted };
     });
-    return { name: s.name, tables: tableList };
+    return { name: s.name, state: s.state, tables: tableList };
   });
   return { success: true, study_count: studies.length, studies };
 }
 
 export async function getPineBoxes({ study_filter, verbose } = {}) {
   const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const raw = (await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter))) || [];
 
   const studies = raw.map(s => {
     const zones = [];
@@ -446,7 +563,7 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
       if (high != null && low != null) { const key = high + ':' + low; if (!seen[key]) { zones.push({ high, low }); seen[key] = true; } }
     }
     zones.sort((a, b) => b.high - a.high);
-    const result = { name: s.name, total_boxes: s.count, zones };
+    const result = { name: s.name, state: s.state, total_boxes: s.count, zones };
     if (verbose) result.all_boxes = allBoxes;
     return result;
   });

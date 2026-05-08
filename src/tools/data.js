@@ -18,15 +18,16 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_strategy_results', 'Get strategy performance metrics from Strategy Tester', {}, async () => {
+  server.tool('data_get_strategy_results', 'Get strategy Performance Summary metrics (PF, WR, Net Profit, Total Closed Trades, Max Drawdown, etc.). Auto-opens Strategy Tester. Returns source="dom_scrape" or "internal_api"; "none" with diagnostics if both paths fail.', {}, async () => {
     try { return jsonResult(await core.getStrategyResults()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_trades', 'Get trade list from Strategy Tester', {
-    max_trades: z.coerce.number().optional().describe('Maximum trades to return'),
-  }, async ({ max_trades }) => {
-    try { return jsonResult(await core.getTrades({ max_trades })); }
+  server.tool('data_get_trades', 'Get the full trade list from Strategy Tester (auto-opens panel, auto-scrolls through virtualized rows). Each trade has trade_num, type/signal entry+exit, entry_time, exit_time, entry_price, exit_price, contracts, pnl_usd, pnl_pct, run_up_usd/pct, drawdown_usd/pct.', {
+    max_trades: z.coerce.number().optional().describe('Maximum trades to return (default 100, max 500). The scraper still walks the entire table; this only caps the output array.'),
+    settle_ms: z.coerce.number().optional().describe('Per-scroll settle delay in ms (default 350, clamped 150–1500). Increase for slower machines or large trade counts.'),
+  }, async ({ max_trades, settle_ms }) => {
+    try { return jsonResult(await core.getTrades({ max_trades, settle_ms })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -47,7 +48,7 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message, hint: 'Open the DOM panel in TradingView before using this tool.' }, true); }
   });
 
-  server.tool('data_get_pine_lines', 'Read horizontal price levels drawn by Pine Script indicators (line.new). Returns deduplicated price levels per study. Use study_filter to target a specific indicator.', {
+  server.tool('data_get_pine_lines', 'Read horizontal price levels drawn by Pine Script indicators (line.new). Returns deduplicated price levels per study. Use study_filter to target a specific indicator. Each study includes a state field: "has_shapes" or "loaded_no_shapes" — the latter means the indicator is on the chart but hasn\'t drawn yet (e.g. an ORB outside its session window), so callers can distinguish "not drawn yet" from "indicator missing".', {
     study_filter: z.string().optional().describe('Substring to match study name (e.g., "Profiler", "NY Levels"). Omit for all.'),
     verbose: z.coerce.boolean().optional().describe('Return raw line data with IDs, coordinates, colors (default false — returns only unique price levels)'),
   }, async ({ study_filter, verbose }) => {
@@ -55,7 +56,7 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_pine_labels', 'Read text labels drawn by Pine Script indicators (label.new). Returns text and price pairs. Use study_filter to target a specific indicator.', {
+  server.tool('data_get_pine_labels', 'Read text labels drawn by Pine Script indicators (label.new). Returns text and price pairs. Use study_filter to target a specific indicator. Each study includes a state field: "has_shapes" or "loaded_no_shapes" so callers can distinguish "not drawn yet" from "indicator missing".', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
     max_labels: z.coerce.number().optional().describe('Max labels per study (default 50). Set higher if you need all.'),
     verbose: z.coerce.boolean().optional().describe('Return raw label data with IDs, colors, positions (default false — returns only text + price)'),
@@ -64,14 +65,14 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_pine_tables', 'Read table data drawn by Pine Script indicators (table.new). Returns formatted text rows per table. Use study_filter to target a specific indicator.', {
+  server.tool('data_get_pine_tables', 'Read table data drawn by Pine Script indicators (table.new). Returns formatted text rows per table. Use study_filter to target a specific indicator. Each study includes a state field: "has_shapes" or "loaded_no_shapes" so callers can distinguish "not drawn yet" from "indicator missing".', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
   }, async ({ study_filter }) => {
     try { return jsonResult(await core.getPineTables({ study_filter })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_pine_boxes', 'Read box/zone boundaries drawn by Pine Script indicators (box.new). Returns deduplicated {high, low} price zones. Use study_filter to target a specific indicator.', {
+  server.tool('data_get_pine_boxes', 'Read box/zone boundaries drawn by Pine Script indicators (box.new). Returns deduplicated {high, low} price zones. Use study_filter to target a specific indicator. Each study includes a state field: "has_shapes" or "loaded_no_shapes" so callers can distinguish "not drawn yet" from "indicator missing".', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
     verbose: z.coerce.boolean().optional().describe('Return all boxes with IDs and coordinates (default false — returns unique price zones)'),
   }, async ({ study_filter, verbose }) => {

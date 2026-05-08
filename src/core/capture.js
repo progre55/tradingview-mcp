@@ -2,6 +2,7 @@
  * Core screenshot/capture logic.
  */
 import { getClient, evaluate, getChartCollection } from '../connection.js';
+import { PANEL_DETECT_JS } from './_panels.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -47,8 +48,8 @@ export async function captureScreenshot({ region, filename, method } = {}) {
   } else if (region === 'strategy_tester') {
     const bounds = await evaluate(`
       (function() {
-        var el = document.querySelector('[data-name="backtesting"]')
-          || document.querySelector('[class*="strategyReport"]');
+        ${PANEL_DETECT_JS}
+        var el = findStrategyTesterContainer();
         if (!el) return null;
         var rect = el.getBoundingClientRect();
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };

@@ -59,11 +59,12 @@ export function registerUiTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('ui_scroll', 'Scroll the chart or page up/down/left/right', {
+  server.tool('ui_scroll', 'Scroll a target region (chart canvas, strategy tester table, pine editor, right panel) up/down/left/right', {
     direction: z.enum(['up', 'down', 'left', 'right']).describe('Scroll direction'),
     amount: z.coerce.number().optional().describe('Scroll amount in pixels (default 300)'),
-  }, async ({ direction, amount }) => {
-    try { return jsonResult(await core.scroll({ direction, amount })); }
+    target: z.enum(['chart', 'strategy-tester', 'pine-editor', 'right-panel']).optional().describe('Which region to scroll. Default "chart" (mouseWheel on the chart canvas). Other targets mutate scrollTop/scrollLeft on the matching DOM container.'),
+  }, async ({ direction, amount, target }) => {
+    try { return jsonResult(await core.scroll({ direction, amount, target })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -85,8 +86,8 @@ export function registerUiTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('ui_evaluate', 'Execute JavaScript code in the TradingView page context for advanced automation', {
-    expression: z.string().describe('JavaScript expression to evaluate in the page context. Wrap in IIFE for complex logic.'),
+  server.tool('ui_evaluate', 'Execute JavaScript in the TradingView page context. Promise-returning expressions are awaited (use `(async function(){ ... })()` for multi-step UI scripts).', {
+    expression: z.string().describe('JavaScript expression to evaluate in the page context. Wrap multi-step / async logic in an async IIFE; the result of the awaited promise is returned.'),
   }, async ({ expression }) => {
     try { return jsonResult(await core.uiEvaluate({ expression })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

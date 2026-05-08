@@ -44,7 +44,7 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix timestamps)', {
+  server.tool('chart_set_visible_range', 'Zoom the chart to a specific date range (unix timestamps). Note: the actual range is silently clamped to available bars — compare response.actual vs response.requested to detect clamping.', {
     from: z.coerce.number().describe('Start of range (unix timestamp in seconds)'),
     to: z.coerce.number().describe('End of range (unix timestamp in seconds)'),
   }, async ({ from, to }) => {

@@ -2,6 +2,7 @@
  * Core batch execution logic.
  */
 import { evaluate, evaluateAsync, getClient, getChartApi, getChartCollection } from '../connection.js';
+import { PANEL_DETECT_JS } from './_panels.js';
 import { waitForChartReady } from '../wait.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -59,12 +60,13 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
           await new Promise(r => setTimeout(r, 1000));
           actionResult = await evaluate(`
             (function() {
+              ${PANEL_DETECT_JS}
               var metrics = {};
-              var panel = document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]');
+              var panel = findStrategyTesterContainer();
               if (!panel) return { error: 'Strategy Tester not found' };
-              var items = panel.querySelectorAll('[class*="reportItem"], [class*="metric"]');
+              var items = panel.querySelectorAll('[class*="containerCell"], [class*="reportItem"], [class*="metric"]');
               items.forEach(function(item) {
-                var label = item.querySelector('[class*="label"]');
+                var label = item.querySelector('[class*="title"], [class*="label"]');
                 var value = item.querySelector('[class*="value"]');
                 if (label && value) metrics[label.textContent.trim()] = value.textContent.trim();
               });

@@ -2,6 +2,7 @@
  * Core UI automation logic.
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { PANEL_DETECT_JS } from './_panels.js';
 
 export async function click({ by, value }) {
   const escaped = JSON.stringify(value);
@@ -34,6 +35,7 @@ export async function openPanel({ panel, action }) {
     const widgetName = panel === 'pine-editor' ? 'pine-editor' : 'backtesting';
     const result = await evaluate(`
       (function() {
+        ${PANEL_DETECT_JS}
         var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
         if (!bwb) return { error: 'bottomWidgetBar not available' };
         var panel = ${JSON.stringify(panel)};
@@ -42,7 +44,7 @@ export async function openPanel({ panel, action }) {
         var bottomArea = document.querySelector('[class*="layout__area--bottom"]');
         var isOpen = !!(bottomArea && bottomArea.offsetHeight > 50);
         if (panel === 'pine-editor') { var monacoEl = document.querySelector('.monaco-editor.pine-editor-monaco'); isOpen = isOpen && !!monacoEl; }
-        if (panel === 'strategy-tester') { var stratPanel = document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'); isOpen = isOpen && !!(stratPanel && stratPanel.offsetParent); }
+        if (panel === 'strategy-tester') { isOpen = isStrategyTesterOpen().open; }
         var performed = 'none';
         if (action === 'open' || (action === 'toggle' && !isOpen)) {
           if (panel === 'pine-editor') { if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab(); else if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
@@ -216,22 +218,65 @@ export async function hover({ by, value }) {
   return { success: true, hovered: { by, value, tag: coords.tag, x: coords.x, y: coords.y } };
 }
 
-export async function scroll({ direction, amount }) {
+export async function scroll({ direction, amount, target }) {
   const c = await getClient();
   const px = amount || 300;
-  const center = await evaluate(`
+  const tgt = target || 'chart';
+  const dx = direction === 'left' ? -px : direction === 'right' ? px : 0;
+  const dy = direction === 'up' ? -px : direction === 'down' ? px : 0;
+
+  const probe = await evaluate(`
     (function() {
-      var el = document.querySelector('[data-name="pane-canvas"]') || document.querySelector('[class*="chart-container"]') || document.querySelector('canvas');
-      if (!el) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      ${PANEL_DETECT_JS}
+      var tgt = ${JSON.stringify(tgt)};
+      var el = null;
+      if (tgt === 'chart') {
+        el = document.querySelector('[data-name="pane-canvas"]') || document.querySelector('[class*="chart-container"]') || document.querySelector('canvas');
+      } else if (tgt === 'strategy-tester') {
+        var panel = findStrategyTesterContainer();
+        if (panel) {
+          var rows = panel.querySelectorAll('[class*="ka-row"]');
+          if (rows.length) {
+            var sc = rows[0].parentElement;
+            for (var i = 0; i < 14 && sc; i++) {
+              try {
+                var st = getComputedStyle(sc);
+                if (/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight + 1) { el = sc; break; }
+              } catch(e) {}
+              sc = sc.parentElement;
+            }
+          }
+          if (!el) el = panel;
+        }
+      } else if (tgt === 'pine-editor') {
+        el = document.querySelector('.monaco-editor.pine-editor-monaco');
+      } else if (tgt === 'right-panel') {
+        el = document.querySelector('[class*="layout__area--right"]');
+      }
+      if (!el) return null;
+      var isCanvas = el.tagName === 'CANVAS';
+      if (!isCanvas) {
+        el.scrollLeft = (el.scrollLeft || 0) + ${dx};
+        el.scrollTop  = (el.scrollTop  || 0) + ${dy};
+        try { el.dispatchEvent(new Event('scroll', { bubbles: true })); } catch(e) {}
+        return { method: 'scrollTop', tag: el.tagName.toLowerCase(), scrollTop: el.scrollTop };
+      }
       var rect = el.getBoundingClientRect();
-      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      return { method: 'mouseWheel', x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
     })()
   `);
-  let deltaX = 0, deltaY = 0;
-  if (direction === 'up') deltaY = -px; else if (direction === 'down') deltaY = px;
-  else if (direction === 'left') deltaX = -px; else if (direction === 'right') deltaX = px;
-  await c.Input.dispatchMouseEvent({ type: 'mouseWheel', x: center.x, y: center.y, deltaX, deltaY });
-  return { success: true, direction, amount: px };
+
+  if (!probe) {
+    if (tgt !== 'chart') throw new Error('No scrollable target found for: ' + tgt);
+    // Fall through to old chart-canvas behavior using window-center fallback.
+    await c.Input.dispatchMouseEvent({ type: 'mouseWheel', x: 400, y: 400, deltaX: dx, deltaY: dy });
+    return { success: true, direction, amount: px, target: tgt, method: 'mouseWheel' };
+  }
+  if (probe.method === 'scrollTop') {
+    return { success: true, direction, amount: px, target: tgt, method: 'scrollTop', scroll_top: probe.scrollTop };
+  }
+  await c.Input.dispatchMouseEvent({ type: 'mouseWheel', x: probe.x, y: probe.y, deltaX: dx, deltaY: dy });
+  return { success: true, direction, amount: px, target: tgt, method: 'mouseWheel' };
 }
 
 export async function mouseClick({ x, y, button, double_click }) {
@@ -288,6 +333,6 @@ export async function findElement({ query, strategy }) {
 }
 
 export async function uiEvaluate({ expression }) {
-  const result = await evaluate(expression);
+  const result = await evaluateAsync(expression);
   return { success: true, result };
 }
