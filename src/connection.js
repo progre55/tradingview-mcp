@@ -105,6 +105,28 @@ export async function evaluateAsync(expression) {
   return evaluate(expression, { awaitPromise: true });
 }
 
+// Repoint the singleton CDP client at a specific target id. Used by tab_switch:
+// /json/activate brings a tab to the desktop foreground, but the CDP socket
+// stays attached to whatever target it first connected to. Without this,
+// evaluate() reads the wrong page after a tab switch.
+export async function attachToTarget(targetId) {
+  if (client) {
+    try { await client.close(); } catch { /* already gone */ }
+    client = null;
+    targetInfo = null;
+  }
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const targets = await resp.json();
+  const target = targets.find(t => t.id === targetId);
+  if (!target) throw new Error(`Target ${targetId} not found in CDP /json/list.`);
+  targetInfo = target;
+  client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId });
+  await client.Runtime.enable();
+  await client.Page.enable();
+  await client.DOM.enable();
+  return target;
+}
+
 export async function disconnect() {
   if (client) {
     try { await client.close(); } catch {}
