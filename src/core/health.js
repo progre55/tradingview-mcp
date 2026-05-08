@@ -2,6 +2,7 @@
  * Core health/discovery/launch logic.
  */
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
+import { PANEL_DETECT_JS } from './_panels.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 
@@ -75,8 +76,29 @@ export async function discover() {
         results.replayApi = { available: !!replay, path: 'window.TradingViewApi._replayApi' };
       } catch(e) { results.replayApi = { available: false, error: e.message }; }
       try {
-        var alerts = window.TradingViewApi._alertService;
-        results.alertService = { available: !!alerts, path: 'window.TradingViewApi._alertService' };
+        var rawAlerts = window.TradingViewApi._alertService;
+        var alerts = rawAlerts;
+        var wrapped = false;
+        if (rawAlerts && typeof rawAlerts.value === 'function') {
+          try { alerts = rawAlerts.value(); wrapped = true; } catch(e) {}
+        }
+        var alertMethods = [];
+        if (alerts) {
+          var pool = [];
+          try { pool = pool.concat(Object.getOwnPropertyNames(alerts)); } catch(e) {}
+          try {
+            var proto = Object.getPrototypeOf(alerts);
+            if (proto && proto !== Object.prototype) pool = pool.concat(Object.getOwnPropertyNames(proto));
+          } catch(e) {}
+          var seen = {};
+          for (var i = 0; i < pool.length; i++) {
+            var k = pool[i];
+            if (seen[k] || k === 'constructor') continue;
+            seen[k] = true;
+            try { if (typeof alerts[k] === 'function') alertMethods.push(k); } catch(e) {}
+          }
+        }
+        results.alertService = { available: !!rawAlerts, wrapped: wrapped, path: 'window.TradingViewApi._alertService', methodCount: alertMethods.length, methods: alertMethods.slice(0, 30) };
       } catch(e) { results.alertService = { available: false, error: e.message }; }
       return results;
     })()
@@ -91,6 +113,7 @@ export async function discover() {
 export async function uiState() {
   const state = await evaluate(`
     (function() {
+      ${PANEL_DETECT_JS}
       var ui = {};
       var bottom = document.querySelector('[class*="layout__area--bottom"]');
       ui.bottom_panel = { open: !!(bottom && bottom.offsetHeight > 50), height: bottom ? bottom.offsetHeight : 0 };
@@ -98,8 +121,8 @@ export async function uiState() {
       ui.right_panel = { open: !!(right && right.offsetWidth > 50), width: right ? right.offsetWidth : 0 };
       var monacoEl = document.querySelector('.monaco-editor.pine-editor-monaco');
       ui.pine_editor = { open: !!monacoEl, width: monacoEl ? monacoEl.offsetWidth : 0, height: monacoEl ? monacoEl.offsetHeight : 0 };
-      var stratPanel = document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]');
-      ui.strategy_tester = { open: !!(stratPanel && stratPanel.offsetParent) };
+      var st = isStrategyTesterOpen();
+      ui.strategy_tester = { open: st.open, reason: st.reason };
       var widgetbar = document.querySelector('[data-name="widgetbar-wrap"]');
       ui.widgetbar = { open: !!(widgetbar && widgetbar.offsetWidth > 50) };
       ui.buttons = {};
