@@ -19,6 +19,8 @@ Custom Pine indicators draw with `line.new()`, `label.new()`, `table.new()`, `bo
 
 Use `study_filter` parameter to target a specific indicator by name substring (e.g., `study_filter: "Profiler"`).
 
+Each returned study includes a `state` field: **`has_shapes`** (the indicator has drawn at least one shape) or **`loaded_no_shapes`** (the indicator is on the chart but hasn't drawn yet — e.g. an ORB outside its session window). Use this to distinguish "not drawn yet" from "indicator missing" — the latter is when the study doesn't appear in `studies` at all.
+
 ### "Give me price data"
 - `data_get_ohlcv` with `summary: true` → compact stats (high, low, range, change%, avg volume, last 5 bars)
 - `data_get_ohlcv` without summary → all bars (use `count` to limit, default 100)
@@ -39,7 +41,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `chart_set_type` → switch chart style (Candles, HeikinAshi, Line, Area, Renko, etc.)
 - `chart_manage_indicator` → add or remove studies (use full name: "Relative Strength Index", not "RSI")
 - `chart_scroll_to_date` → jump to a date (ISO format: "2025-01-15")
-- `chart_set_visible_range` → zoom to exact date range (unix timestamps)
+- `chart_set_visible_range` → zoom to exact date range (unix timestamps). Note: the actual range silently clamps to available bars — compare `response.actual` vs `response.requested` to detect clamping.
 
 ### "Work on Pine Script"
 1. `pine_set_source` → inject code into editor
@@ -69,9 +71,12 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `draw_clear` → remove all
 
 ### "Manage alerts"
-- `alert_create` → set price alert (condition: "crossing", "greater_than", "less_than")
-- `alert_list` → view active alerts
-- `alert_delete` → remove alerts
+- `alert_create` → set price alert (condition: "crossing", "crossing_down", "greater_than", "less_than"). Uses the in-page `_alertService` JS API (preferred) → REST fallback → DOM fallback. Symbol/resolution come from the active chart.
+- `alert_list` → view active alerts (returns `alert_id`, `symbol`, `type` ("price" or "strategy"), `condition`, etc.)
+- `alert_delete` → three modes:
+  - `{ alert_id: <n> }` → delete one alert by id (recommended for cleanup workflows)
+  - `{ filter: { type: "price" | "strategy", symbol: "..." } }` → batch-delete a filtered subset
+  - `{ delete_all: true }` → delete all alerts EXCEPT `type: "strategy"`. To also include strategy alerts, pass `force: true` (DESTRUCTIVE — wipes bot webhook alerts).
 
 ### "Navigate the UI"
 - `ui_open_panel` → open/close pine-editor, strategy-tester, watchlist, alerts, trading
@@ -117,8 +122,15 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Pine indicators must be **visible** on chart for pine graphics tools to read their data
 - `chart_manage_indicator` requires **full indicator names**: "Relative Strength Index" not "RSI", "Moving Average Exponential" not "EMA", "Bollinger Bands" not "BB"
 - Screenshots save to `screenshots/` directory with timestamps
-- OHLCV capped at 500 bars, trades at 20 per request
+- OHLCV capped at 500 bars; trades capped at 500 per request (default 100)
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
+- `data_get_strategy_results` and `data_get_trades` try the **internal API first** (`strat.reportData()` on the active strategy data source) and fall back to DOM scraping only when no strategy is currently selected/computed in the Strategy Tester. The API path is non-intrusive — it does not toggle the bottom panel or shift any tab — and returns long/short metric breakdowns plus rich per-trade fields. The DOM fallback opens the panel + activates the relevant tab.
+- `data_get_strategy_results` returns `source: 'internal_api'` (preferred) or `'dom_scrape'`. Internal-API metric labels mirror the Performance Summary ("Net Profit", "Profit Factor", "Sharpe Ratio", "Sortino Ratio", etc.). The response also includes `long_metrics` / `short_metrics` when long/short breakdowns are populated.
+- `data_get_trades` returns `source: 'internal_api'` (preferred) or `'dom_scrape'`. The internal-API path returns the full trade list synchronously; the DOM fallback walks the virtualized `ka-table`. Each row exposes `entry_time`, `exit_time`, `entry_price`, `exit_price`, `entry_signal`, `exit_signal`, `pnl_usd`, `pnl_pct`, `favorable_excursion_*`, `adverse_excursion_*`, `cumulative_pnl_*`, plus `contracts` and `trade_num`. A `Margin call` value in `entry_signal` / `exit_signal` is TradingView's marker for an account blow-up under `default_qty_type=strategy.percent_of_equity, default_qty_value=100` — it indicates strategy sizing is too aggressive, not an MCP bug.
+- Strategy detection: a Pine source is a strategy iff `meta.id` starts with `StrategyScript$` OR `meta.isTVScriptStrategy === true`. Indicators (including ones with `s.performance()` and `s.preferredZOrder` methods) are NOT strategies — those methods are present on every Pine source on current builds and produce false positives if used as discriminators.
+- `tab_switch` brings a chart tab to the desktop foreground AND repoints the CDP socket, so subsequent `evaluate()` / `ui_evaluate` calls land on the new tab. Without the second step, page-context calls would keep reading the original tab regardless of what's visible to the operator.
+- `ui_evaluate` awaits Promise-returning expressions — wrap multi-step async logic in `(async function(){ ... })()` and the resolved value is returned directly.
+- `ui_scroll` defaults to scrolling the chart canvas (mouse wheel). Pass `target: 'strategy-tester' | 'pine-editor' | 'right-panel'` to scroll those panels via direct `scrollTop` / `scrollLeft` mutation.
 
 ## Architecture
 
