@@ -348,32 +348,47 @@ export async function save() {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const c = await getClient();
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
-  await new Promise(r => setTimeout(r, 800));
-
-  // Handle "Save Script" name dialog that appears for new/unsaved scripts
-  const dialogHandled = await evaluate(`
+  // Click the Pine Editor's save button directly (Ctrl+S saves the chart layout, not the script)
+  const clicked = await evaluate(`
     (function() {
-      var saveBtn = null;
-      var btns = document.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (text === 'Save' && btns[i].offsetParent !== null) {
-          // Check if it's in a dialog (not the Pine Editor save button)
-          var parent = btns[i].closest('[class*="dialog"], [class*="modal"], [class*="popup"], [role="dialog"]');
-          if (parent) { saveBtn = btns[i]; break; }
-        }
-      }
-      if (saveBtn) { saveBtn.click(); return true; }
-      return false;
+      var btn = document.querySelector('[class*="saveButton"]');
+      if (!btn) return { clicked: false, error: 'Save button not found' };
+      btn.click();
+      return { clicked: true };
     })()
   `);
+  if (!clicked || !clicked.clicked) throw new Error(clicked?.error || 'Save button not found in Pine Editor.');
+
+  // Wait for the "Save Script" rename dialog (appears for new/untitled scripts)
+  let dialogHandled = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 200));
+    const dialog = await evaluate(`
+      (function() {
+        var d = document.querySelector('[data-name="rename-dialog"]');
+        if (!d) return null;
+        var rect = d.getBoundingClientRect();
+        if (rect.width < 10) return null;
+        // Click the Save button inside the rename dialog
+        var btn = d.querySelector('button[name="save"]');
+        if (!btn) {
+          // Fallback: look for any Save button in the dialog
+          var btns = d.querySelectorAll('button');
+          for (var j = 0; j < btns.length; j++) {
+            if (btns[j].textContent.trim() === 'Save') { btn = btns[j]; break; }
+          }
+        }
+        if (btn) { btn.click(); return 'confirmed'; }
+        return 'dialog_visible_no_button';
+      })()
+    `);
+    if (dialog === 'confirmed') { dialogHandled = true; break; }
+    if (dialog === 'dialog_visible_no_button') break;
+  }
 
   if (dialogHandled) await new Promise(r => setTimeout(r, 500));
 
-  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
+  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'saved' };
 }
 
 export async function getConsole() {
