@@ -33,8 +33,15 @@ register('pine', {
       },
     }],
     ['compile', {
-      description: 'Smart compile: detect button, compile, check errors',
-      handler: () => core.smartCompile(),
+      description: 'Smart compile (default: non-destructive translate_light API). Pass --commit to also click Save-and-add-to-chart.',
+      options: {
+        commit: { type: 'boolean', description: 'Click "Save and add to chart" (DESTRUCTIVE on a saved script — bumps version).' },
+      },
+      handler: (opts) => core.smartCompile({ commit: !!opts.commit }),
+    }],
+    ['active', {
+      description: 'Read the active editor tab\'s identity (script_id, script_name, is_saved, is_dirty)',
+      handler: () => core.getActiveScript(),
     }],
     ['raw-compile', {
       description: 'Click compile/add button without smart detection',

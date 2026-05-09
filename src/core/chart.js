@@ -112,7 +112,49 @@ export async function getVisibleRange() {
   return { success: true, visible_range: result.visible_range, bars_range: result.bars_range };
 }
 
+// Pure helper: decide whether the post-scroll visible range actually covers
+// the requested target. Used by setVisibleRange and scrollToDate after they
+// fire the underlying chart event. Issue v4 #1: zoomToBarsRange is a no-op
+// when the target falls outside the currently-loaded bars (the main series
+// only holds what TV's data feed has streamed so far). The classifier maps
+// (requested, actual) → {moved, target_in_actual} so callers see the bug
+// instead of the previous silent success.
+//
+// Tolerance: we accept "target inside actual.from .. actual.to" as covered.
+// `moved` is a structural before/after check — if the chart didn't move at
+// all and the target wasn't already in the visible range, the scroll is a
+// no-op.
+export function classifyVisibleRangeOutcome({ before, after, target }) {
+  const safe = (r) => r && Number.isFinite(r.from) && Number.isFinite(r.to);
+  if (!safe(after)) {
+    return { success: false, moved: false, target_in_actual: false, reason: 'no_actual_range' };
+  }
+  const moved = !!safe(before) && (before.from !== after.from || before.to !== after.to);
+  const target_in_actual = target == null
+    ? true
+    : (after.from <= Number(target) && Number(target) <= after.to);
+  return {
+    success: target_in_actual,
+    moved,
+    target_in_actual,
+    reason: target_in_actual
+      ? null
+      : (moved ? 'target_outside_actual_range' : 'chart_did_not_move'),
+  };
+}
+
+async function readVisibleRange() {
+  return evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      try { var r = chart.getVisibleRange(); return { from: r.from || 0, to: r.to || 0 }; }
+      catch(e) { return { from: 0, to: 0, error: e.message }; }
+    })()
+  `);
+}
+
 export async function setVisibleRange({ from, to }) {
+  const before = await readVisibleRange();
   await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -130,15 +172,24 @@ export async function setVisibleRange({ from, to }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
-  const actual = await evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      try { var r = chart.getVisibleRange(); return { from: r.from || 0, to: r.to || 0 }; }
-      catch(e) { return { from: 0, to: 0, error: e.message }; }
-    })()
-  `);
-  return { success: true, requested: { from, to }, actual: actual || { from: 0, to: 0 } };
+  await new Promise(r => setTimeout(r, 800));
+  const actual = await readVisibleRange();
+  // Target is "the middle of the requested range" — any bar between from..to
+  // is acceptable coverage for setVisibleRange.
+  const target = Math.floor((Number(from) + Number(to)) / 2);
+  const outcome = classifyVisibleRangeOutcome({ before, after: actual, target });
+  if (outcome.success) {
+    return { success: true, requested: { from, to }, actual };
+  }
+  return {
+    success: false,
+    error: outcome.reason === 'chart_did_not_move'
+      ? 'chart did not move — requested range likely falls outside loaded bars. Scroll the chart manually or pick a range covered by getVisibleRange().'
+      : 'chart moved but the requested range is not inside actual.from..actual.to (likely clamped to loaded bars).',
+    requested: { from, to },
+    actual,
+    moved: outcome.moved,
+  };
 }
 
 export async function scrollToDate({ date }) {
@@ -159,6 +210,7 @@ export async function scrollToDate({ date }) {
   const from = timestamp - halfWindow;
   const to = timestamp + halfWindow;
 
+  const before = await readVisibleRange();
   await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -176,8 +228,31 @@ export async function scrollToDate({ date }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
-  return { success: true, date, centered_on: timestamp, resolution, window: { from, to } };
+  await new Promise(r => setTimeout(r, 800));
+  const actual = await readVisibleRange();
+  const outcome = classifyVisibleRangeOutcome({ before, after: actual, target: timestamp });
+  if (outcome.success) {
+    return {
+      success: true,
+      date,
+      centered_on: timestamp,
+      resolution,
+      window: { from, to },
+      actual,
+    };
+  }
+  return {
+    success: false,
+    error: outcome.reason === 'chart_did_not_move'
+      ? 'chart did not scroll — the requested date likely falls outside loaded bars. Try a date already covered by getVisibleRange(), or scroll the chart manually first to load history.'
+      : 'chart moved but the requested date is not inside actual.from..actual.to (likely clamped to loaded bars).',
+    date,
+    centered_on: timestamp,
+    resolution,
+    requested_window: { from, to },
+    actual,
+    moved: outcome.moved,
+  };
 }
 
 export async function symbolInfo() {

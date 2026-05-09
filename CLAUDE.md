@@ -41,16 +41,18 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 - `chart_set_type` → switch chart style (Candles, HeikinAshi, Line, Area, Renko, etc.)
 - `chart_manage_indicator` → add or remove studies (use full name: "Relative Strength Index", not "RSI")
 - `chart_scroll_to_date` → jump to a date (ISO format: "2025-01-15")
-- `chart_set_visible_range` → zoom to exact date range (unix timestamps). Note: the actual range silently clamps to available bars — compare `response.actual` vs `response.requested` to detect clamping.
+- `chart_set_visible_range` → zoom to exact date range (unix timestamps). Returns `success: false` when the chart didn't actually scroll to cover the requested range (e.g., target outside loaded bars). Compare `response.actual` vs `response.requested` for the realized window.
+- `chart_scroll_to_date` → jump the chart to a date. Returns `success: false` when the date is outside the loaded bar range (TV's data feed lazy-loads history; the JS `setVisibleRange` API is `Not implemented` on Desktop, so out-of-range dates require operator-driven scrolling first). Response includes `actual` and `moved` for diagnosis.
 
 ### "Work on Pine Script"
-1. `pine_set_source` → inject code into editor
-2. `pine_smart_compile` → compile with auto-detection + error check
-3. `pine_get_errors` → read compilation errors
-4. `pine_get_console` → read log.info() output
-5. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts)
-6. `pine_save` → save to TradingView cloud
-7. `pine_new` → create blank indicator/strategy/library
+1. `pine_get_active_script` → identify the current tab BEFORE writing (returns `{script_id, script_name, is_saved, is_dirty, version}`). Use this to confirm you're not about to overwrite a saved user script.
+2. `pine_set_source` → inject code into editor (returns `script_id` / `script_name`)
+3. `pine_smart_compile` → **non-destructive by default** — compiles via the `pine-facade /translate_light` API, returns errors/warnings, **does not save**. Pass `commit:true` to ALSO click "Save and add to chart" (DESTRUCTIVE — bumps a saved script's version).
+4. `pine_get_errors` → read compilation errors
+5. `pine_get_console` → read log.info() output
+6. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts; returns `script_id` / `script_name`)
+7. `pine_save` → save to TradingView cloud (fail-closes when active-tab identity can't be read)
+8. `pine_new` → create a fresh untitled tab. Auto-opens the editor panel if closed. Returns `success: false` with the active script's identity if a saved script remains active after the attempt — caller must switch tabs manually in that case.
 8. `pine_open` → load a saved script by name
 
 ### "Practice trading with replay"
@@ -131,6 +133,11 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - `tab_switch` brings a chart tab to the desktop foreground AND repoints the CDP socket, so subsequent `evaluate()` / `ui_evaluate` calls land on the new tab. Without the second step, page-context calls would keep reading the original tab regardless of what's visible to the operator.
 - `ui_evaluate` awaits Promise-returning expressions — wrap multi-step async logic in `(async function(){ ... })()` and the resolved value is returned directly.
 - `ui_scroll` defaults to scrolling the chart canvas (mouse wheel). Pass `target: 'strategy-tester' | 'pine-editor' | 'right-panel'` to scroll those panels via direct `scrollTop` / `scrollLeft` mutation.
+- `pine_smart_compile` is **non-destructive by default** (`commit:false`) — compiles via `pine-facade /translate_light` and returns errors/warnings without touching the chart or saved-scripts list. Pass `commit:true` to also click "Save and add to chart" (DESTRUCTIVE — bumps a saved user script's version on TV cloud). The "Pine Save" fallback path was the v3 data-loss accident and has been removed.
+- `pine_new` is post-condition checked: it confirms the active tab is a fresh untitled draft (`is_untitled_draft: true`) before injecting the template. If a saved user script remains active after the new-tab attempt, the call returns `success: false` with `active_script_id` / `active_script_name`. Auto-opens the editor panel if closed (15s budget).
+- All editor write tools (`pine_set_source`, `pine_compile`, `pine_save`, `pine_smart_compile`, `pine_new`, `pine_open`, `pine_get_source`) attach `script_id` and `script_name` to their return. `pine_get_active_script` is a zero-side-effect probe that returns `{script_id, script_name, version, is_saved, is_dirty, source}` — call it before any destructive op to verify identity.
+- `indicator_set_inputs` resolves override keys against input `id`, Pine variable `name`, or display `title` (case-insensitive). Returns `updated_inputs` (id-keyed map of what was applied), `unmatched_keys` (overrides that didn't match), and `input_keys` (every valid identifier for the study). When a non-empty `inputs` object yields zero matches, the call returns `success: false` rather than a silent no-op.
+- `chart_scroll_to_date` and `chart_set_visible_range` self-verify after firing `zoomToBarsRange`: if the requested target is not inside the resulting visible range (or the chart didn't move at all), the response is `success: false` with `actual`, `moved`, and a reason. TV's public `setVisibleRange` / `setVisibleTimeRange` / `loadRange` are `Not implemented` on the current Desktop build, so out-of-range historical dates require operator-driven scrolling first.
 
 ## Architecture
 
