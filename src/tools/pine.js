@@ -35,15 +35,22 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes', {}, async () => {
-    try { return jsonResult(await core.smartCompile()); }
+  server.tool('pine_smart_compile', 'Compile via translate_light API (non-destructive). Pass commit:true to also click "Save and add to chart" (DESTRUCTIVE: bumps the saved-script version on TV cloud).', {
+    commit: z.coerce.boolean().optional().default(false).describe('Set true to also click Save-and-add-to-chart. DESTRUCTIVE on a saved user script — verify identity via pine_get_active_script first.'),
+  }, async ({ commit }) => {
+    try { return jsonResult(await core.smartCompile({ commit })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
+  server.tool('pine_new', 'Create a fresh untitled Pine Script tab. Auto-opens the Pine Editor panel if closed. Refuses (success:false) when another saved script remains active after the attempt — the caller must switch tabs manually in that case.', {
     type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
   }, async ({ type }) => {
     try { return jsonResult(await core.newScript({ type })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_get_active_script', 'Read the active editor tab\'s identity (script_id, script_name, version, is_saved, is_dirty). Side-effect free — does not click, does not write. Use this to verify which script you are about to overwrite before pine_save / pine_smart_compile({commit:true}).', {}, async () => {
+    try { return jsonResult(await core.getActiveScript()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
