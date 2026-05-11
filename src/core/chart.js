@@ -184,8 +184,8 @@ export async function setVisibleRange({ from, to }) {
   return {
     success: false,
     error: outcome.reason === 'chart_did_not_move'
-      ? 'chart did not move — requested range likely falls outside loaded bars. Scroll the chart manually or pick a range covered by getVisibleRange().'
-      : 'chart moved but the requested range is not inside actual.from..actual.to (likely clamped to loaded bars).',
+      ? 'chart did not move — requested range likely falls outside loaded bars. Scroll the chart manually first, or call chart_get_visible_range to find an in-range window before retrying.'
+      : 'chart moved but the requested range is not inside actual.from..actual.to (likely clamped to loaded bars). Call chart_get_visible_range to see what is currently reachable.',
     requested: { from, to },
     actual,
     moved: outcome.moved,
@@ -244,8 +244,8 @@ export async function scrollToDate({ date }) {
   return {
     success: false,
     error: outcome.reason === 'chart_did_not_move'
-      ? 'chart did not scroll — the requested date likely falls outside loaded bars. Try a date already covered by getVisibleRange(), or scroll the chart manually first to load history.'
-      : 'chart moved but the requested date is not inside actual.from..actual.to (likely clamped to loaded bars).',
+      ? 'chart did not scroll — the requested date likely falls outside loaded bars. Call chart_get_visible_range to find an in-range date, or scroll the chart manually first to load history.'
+      : 'chart moved but the requested date is not inside actual.from..actual.to (likely clamped to loaded bars). Call chart_get_visible_range to see the currently reachable window.',
     date,
     centered_on: timestamp,
     resolution,

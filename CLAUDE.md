@@ -40,9 +40,8 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 - `chart_set_timeframe` → switch resolution (e.g., "1", "5", "15", "60", "D", "W")
 - `chart_set_type` → switch chart style (Candles, HeikinAshi, Line, Area, Renko, etc.)
 - `chart_manage_indicator` → add or remove studies (use full name: "Relative Strength Index", not "RSI")
-- `chart_scroll_to_date` → jump to a date (ISO format: "2025-01-15")
+- `chart_scroll_to_date` → jump to a date (ISO format: "2025-01-15"). Returns `success: false` when the date is outside the loaded bar range (TV's data feed lazy-loads history; the JS `setVisibleRange` API is `Not implemented` on Desktop, so out-of-range dates require operator-driven scrolling first). Response includes `actual` and `moved` for diagnosis.
 - `chart_set_visible_range` → zoom to exact date range (unix timestamps). Returns `success: false` when the chart didn't actually scroll to cover the requested range (e.g., target outside loaded bars). Compare `response.actual` vs `response.requested` for the realized window.
-- `chart_scroll_to_date` → jump the chart to a date. Returns `success: false` when the date is outside the loaded bar range (TV's data feed lazy-loads history; the JS `setVisibleRange` API is `Not implemented` on Desktop, so out-of-range dates require operator-driven scrolling first). Response includes `actual` and `moved` for diagnosis.
 
 ### "Work on Pine Script"
 1. `pine_get_active_script` → identify the current tab BEFORE writing (returns `{script_id, script_name, is_saved, is_dirty, version}`). Use this to confirm you're not about to overwrite a saved user script.
@@ -53,7 +52,7 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 6. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts; returns `script_id` / `script_name`)
 7. `pine_save` → save to TradingView cloud (fail-closes when active-tab identity can't be read)
 8. `pine_new` → create a fresh untitled tab. Auto-opens the editor panel if closed. Returns `success: false` with the active script's identity if a saved script remains active after the attempt — caller must switch tabs manually in that case.
-8. `pine_open` → load a saved script by name
+9. `pine_open` → load a saved script by name
 
 ### "Practice trading with replay"
 1. `replay_start` with `date: "2025-03-01"` → enter replay mode

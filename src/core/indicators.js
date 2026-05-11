@@ -104,8 +104,11 @@ export async function setInputs({ entity_id, inputs: inputsRaw }) {
   const idKeyedOverrides = {};
   for (const m of matched) idKeyedOverrides[m.id] = m.value;
 
-  // Surface the available identifiers regardless of outcome — callers can
-  // see exactly which keys would have worked.
+  // Surface the full input descriptors regardless of outcome — each is
+  // `{id, name, title, current_value}`, and callers can use any of id /
+  // name / title as a future override key. Field name is `input_keys` for
+  // backward compatibility with the existing tool surface; the descriptor
+  // shape is documented in the tool description.
   const input_keys = currentInputs;
 
   if (matched.length === 0) {

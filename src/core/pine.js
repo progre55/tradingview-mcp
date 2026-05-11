@@ -944,6 +944,25 @@ export async function newScript({ type }) {
     };
   }
 
+  // Edge case: attemptNewTab found no handler/button, and the active tab is
+  // the same untitled draft the user had open before the call. Without this
+  // guard, setValue() would clobber an in-progress draft that the operator
+  // was about to use. Refuse — the operator can clear the buffer manually or
+  // open a new tab themselves.
+  const sameTab = !attempt.ok
+    && after.script_id === before.script_id
+    && after.script_name === before.script_name;
+  if (sameTab) {
+    return {
+      success: false,
+      error: 'could not open a new tab; the active untitled draft was not changed, refusing to overwrite its buffer',
+      attempted: attempt.source,
+      active_script_id: after.script_id,
+      active_script_name: after.script_name,
+      source: 'verify_failed',
+    };
+  }
+
   // Inject the template now that we know we're on an untitled draft.
   const escaped = JSON.stringify(template);
   const set = await evaluate(`
