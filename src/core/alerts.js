@@ -3,21 +3,25 @@
  *
  * REST endpoints (cookies-only auth — no auth_token, no CSRF):
  *   GET  /list_alerts                        existing
- *   POST /create_alert    body {payload: {…}}     new — captured from UI
+ *   POST /create_alert    body {payload: {…}}     captured from UI
  *   POST /delete_alerts   body {payload: {alert_ids: [...]}}   batch-native
  *
  * Body shape mirrors what TradingView's own UI sends. Required fields per the
  * captured request: symbol (JSON-escaped), resolution, conditions (array),
- * expiration, active, ignore_warnings. Server returns the created alert
- * (including alert_id) directly so we don't need a list-back round-trip.
+ * expiration, active, ignore_warnings, plus the notification channel toggles
+ * (popup, mobile_push, email, sms_over_email, web_hook, sound_file,
+ * sound_duration). Server returns the created alert (including alert_id) but
+ * with a request-time `active: false` shell — `create()` reads back via
+ * `/list_alerts` to get the authoritative state (v5 fix).
  *
  * `_alertService` was removed from this TradingView build — JS-side fallback
  * is gone. tv_discover still enumerates it (will show methodCount: 0) so a
- * future build that restores the service is detectable. The DOM dialog path
- * is kept as a last-resort visibility for legacy builds; current builds break
- * the price-input selector and produce price_set: false.
+ * future build that restores the service is detectable. The DOM dialog
+ * fallback was removed in v5 — its price-input selector is broken on current
+ * builds (produces price_set: false) and a DOM-created alert has no alert_id
+ * for the new verify-after-write path to look up.
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { evaluate, evaluateAsync } from '../connection.js';
 
 const PRICEALERTS_ORIGIN = 'https://pricealerts.tradingview.com';
 
@@ -122,6 +126,62 @@ function buildConditions(condition, price, resolution) {
   }];
 }
 
+// TV's UI defaults for the sound channel, captured via
+// scripts/capture_alert_sound.js against a live build. Used when callers
+// pass the boolean shorthand `sound: true`. Re-capture with that script if
+// a future build changes the default sound id.
+export const SOUND_DEFAULT_ID = 'alert/funny/cash-register';
+export const SOUND_DEFAULT_DURATION = 0; // 0 = "Once"
+
+// Translate the user-facing `notifications` object into the REST payload's
+// channel keys. Omitting `notifications` (or any sub-field) keeps the v4
+// hardcoded behavior: every channel off. Sound accepts either the boolean
+// shorthand (uses captured TV-UI defaults) or an explicit `{ id, duration }`.
+// Exported for unit tests.
+export function buildNotificationFields(notifications) {
+  const n = notifications || {};
+  const fields = {
+    popup: n.popup === true,
+    mobile_push: n.app === true,
+    email: n.email === true,
+    sms_over_email: n.sms === true,
+    web_hook: typeof n.webhook === 'string' && n.webhook ? n.webhook : null,
+    sound_file: '',
+    sound_duration: 0,
+  };
+  if (n.sound === true) {
+    fields.sound_file = SOUND_DEFAULT_ID;
+    fields.sound_duration = SOUND_DEFAULT_DURATION;
+  } else if (n.sound && typeof n.sound === 'object' && typeof n.sound.id === 'string') {
+    fields.sound_file = n.sound.id;
+    const d = Number(n.sound.duration);
+    fields.sound_duration = Number.isFinite(d) ? d : 0;
+  }
+  return fields;
+}
+
+// v5 fix: classify the post-create state by reading back via /list_alerts.
+// TV's /create_alert response carries a request-time shell with active:false
+// even when the alert is accepted and fire-eligible; the authoritative state
+// only persists on the listing endpoint. This pure helper makes the decision
+// testable. Mirrors classifyVisibleRangeOutcome in src/core/chart.js.
+export function classifyAlertCreateOutcome(created, verified, listError) {
+  const createdActive = !!(created && created.active);
+  if (listError) {
+    return { active: createdActive, verified_via_list: false, reason: 'list_failed' };
+  }
+  if (!verified) {
+    return { active: createdActive, verified_via_list: false, reason: 'not_found_in_list' };
+  }
+  const verifiedActive = !!verified.active;
+  const overrode = verifiedActive && !createdActive;
+  return {
+    active: verifiedActive,
+    verified_via_list: true,
+    reason: overrode ? 'list_overrode_create' : null,
+  };
+}
+
 async function postCreateAlert(payload) {
   return evaluateAsync(`
     (async function() {
@@ -160,59 +220,7 @@ async function postDeleteAlerts(alert_ids) {
   `);
 }
 
-async function tryDomCreate({ price, message }) {
-  // Last-resort path; selectors are known broken on current builds. Kept so
-  // an old build still has a chance, but the create() result will surface
-  // source: 'dom_legacy' and a warning so the operator sees REST failed.
-  const opened = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[aria-label="Create Alert"]') || document.querySelector('[data-name="alerts"]');
-      if (btn) { btn.click(); return true; }
-      return false;
-    })()
-  `);
-  if (!opened) {
-    const client = await getClient();
-    await client.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 1, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
-    await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 'a', code: 'KeyA' });
-  }
-  await new Promise(r => setTimeout(r, 1000));
-  const priceSet = await evaluate(`
-    (function() {
-      var inputs = document.querySelectorAll('[class*="alert"] input[type="text"], [class*="alert"] input[type="number"]');
-      for (var i = 0; i < inputs.length; i++) {
-        var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        nativeSet.call(inputs[i], '${Number(price)}');
-        inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-        inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      return inputs.length > 0;
-    })()
-  `);
-  if (message) {
-    await evaluate(`
-      (function() {
-        var ta = document.querySelector('[class*="alert"] textarea') || document.querySelector('textarea[placeholder*="message"]');
-        if (ta) {
-          var nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-          nativeSet.call(ta, ${JSON.stringify(message)});
-          ta.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      })()
-    `);
-  }
-  await new Promise(r => setTimeout(r, 500));
-  const submitted = await evaluate(`
-    (function() {
-      var btns = document.querySelectorAll('button[data-name="submit"], button');
-      for (var i = 0; i < btns.length; i++) if (/^create$/i.test(btns[i].textContent.trim())) { btns[i].click(); return true; }
-      return false;
-    })()
-  `);
-  return { submitted: !!submitted, price_set: !!priceSet };
-}
-
-export async function create({ condition, price, message, conditions_override, expiration_days } = {}) {
+export async function create({ condition, price, message, conditions_override, expiration_days, notifications } = {}) {
   const numericPrice = Number(price);
   if (!Number.isFinite(numericPrice)) {
     return { success: false, error: 'price must be a finite number', price, condition, message: message || '(none)' };
@@ -235,46 +243,52 @@ export async function create({ condition, price, message, conditions_override, e
     auto_deactivate: true,
     active: true,
     ignore_warnings: true,
-    popup: false,
-    mobile_push: false,
-    email: false,
-    sms_over_email: false,
-    web_hook: null,
     name: null,
-    sound_file: '',
-    sound_duration: 0,
+    ...buildNotificationFields(notifications),
   };
 
   const rest = await postCreateAlert(payload);
-  if (rest && rest.response && rest.response.s === 'ok' && rest.response.r) {
-    const created = rest.response.r;
+  if (!rest || !rest.response || rest.response.s !== 'ok' || !rest.response.r) {
     return {
-      success: true,
+      success: false,
       source: 'rest',
-      alert_id: created.alert_id,
-      symbol: parseSymbol(created.symbol),
-      condition: created.condition,
-      active: created.active,
-      expiration: created.expiration,
+      error: 'REST create_alert failed',
+      rest_status: rest?.status,
+      rest_response: rest?.response,
+      rest_body_preview: rest?.body_preview,
+      rest_error: rest?.error,
       price: numericPrice,
+      condition,
       message: message || '(none)',
     };
   }
 
-  // REST failed — fall through to DOM as a courtesy.
-  const dom = await tryDomCreate({ price: numericPrice, message });
+  const created = rest.response.r;
+
+  // v5 fix: read back via /list_alerts. TV's create response carries a
+  // request-time shell with active:false even when the alert is accepted.
+  let verifiedRow = null;
+  let listError = null;
+  try {
+    const listing = await list();
+    if (listing.success) verifiedRow = listing.alerts.find(a => a.alert_id === created.alert_id) || null;
+    else listError = listing.error || 'list_unsuccessful';
+  } catch (e) {
+    listError = e.message;
+  }
+  const outcome = classifyAlertCreateOutcome(created, verifiedRow, listError);
+
   return {
-    success: false,
-    source: 'dom_legacy',
-    warning: 'REST create_alert failed; DOM dialog opened as last resort.',
-    rest_status: rest?.status,
-    rest_response: rest?.response,
-    rest_body_preview: rest?.body_preview,
-    rest_error: rest?.error,
-    dom_price_set: dom.price_set,
-    dom_submitted: dom.submitted,
+    success: true,
+    source: 'rest',
+    alert_id: created.alert_id,
+    symbol: parseSymbol(created.symbol),
+    condition: created.condition,
+    active: outcome.active,
+    verified_via_list: outcome.verified_via_list,
+    verify_reason: outcome.reason,
+    expiration: created.expiration,
     price: numericPrice,
-    condition,
     message: message || '(none)',
   };
 }

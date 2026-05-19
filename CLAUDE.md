@@ -72,7 +72,7 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 - `draw_clear` → remove all
 
 ### "Manage alerts"
-- `alert_create` → set price alert (condition: "crossing", "crossing_down", "greater_than", "less_than"). Uses the in-page `_alertService` JS API (preferred) → REST fallback → DOM fallback. Symbol/resolution come from the active chart.
+- `alert_create` → set price alert (condition: "crossing", "crossing_down", "greater_than", "less_than"). Pure REST against `pricealerts.tradingview.com` — `_alertService` is gone on current builds and the DOM fallback was removed in v5 (broken on current builds; produced `price_set: false`). Symbol/resolution come from the active chart. Optional `notifications: { popup?, app?, email?, sms?, webhook?, sound? }` enables channels (all-off by default; `app` is mobile + desktop push). Response returns `active` + `verified_via_list: true` after a read-back against `/list_alerts` — TV's create response carries a request-time shell with `active: false` (v5 fix). If the read-back can't find the row, response returns `verified_via_list: false` with `verify_reason: 'not_found_in_list' | 'list_failed'` and falls back to the create-time `active`.
 - `alert_list` → view active alerts (returns `alert_id`, `symbol`, `type` ("price" or "strategy"), `condition`, etc.)
 - `alert_delete` → three modes:
   - `{ alert_id: <n> }` → delete one alert by id (recommended for cleanup workflows)
