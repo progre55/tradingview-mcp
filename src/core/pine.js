@@ -186,11 +186,13 @@ const FIND_PINE_TAB_STATE = `
  * bound model. Returns:
  *   { ready: true }
  *   { ready: false, reason: 'monaco_not_ready_after_remount' }  // recoverable
- *   { ready: false, reason: 'panel_never_opened' }              // bwb no-op'd
+ *   { ready: false, reason: 'panel_never_opened' }              // bwb didn't mount the panel
+ *   { ready: false, reason: 'bwb_unavailable' }                 // bottomWidgetBar gone
+ *   { ready: false, reason: 'remount_threw' }                   // hide/show raised
  *
  * The remount path mirrors the operator workaround (close+reopen the panel) for
  * the Monaco-stuck-loading case where bwb.showWidget is a no-op on an already
- * visible widget. See issues/2026-05-23-pine-set-source-editor-stuck-loading.md.
+ * visible widget.
  */
 export async function ensurePineEditorOpen() {
   const probe = async () => evaluate(`(function() { return ${FIND_MONACO} !== null; })()`);
@@ -214,71 +216,91 @@ export async function ensurePineEditorOpen() {
     })()
   `);
 
-  // Short poll first — a healthy mount lands well under 3s. Avoid the heavier
-  // remount path for the common case.
+  // Short poll first — a healthy mount lands well under this budget. Avoid the
+  // heavier remount path for the common case.
   for (let i = 0; i < 15; i++) {
     await new Promise(r => setTimeout(r, 200));
     if (await probe()) return { ready: true };
   }
 
   // Force remount: programmatic equivalent of the operator clicking X then
-  // reopening the panel. Only runs when the panel DOM container exists — if it
-  // doesn't, the panel never opened in the first place and hideWidget would
-  // no-op anyway.
-  const remounted = await evaluate(`
+  // reopening the panel. The IIFE catches any throw from bwb.hideWidget so a
+  // mid-mount race doesn't escape the typed return shape.
+  const hideState = await evaluate(`
     (function() {
-      var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-      if (!bwb) return false;
-      var container = document.querySelector('.monaco-editor.pine-editor-monaco');
-      if (!container) return false;
-      if (typeof bwb.hideWidget === 'function') bwb.hideWidget('pine-editor');
-      return true;
+      try {
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        if (!bwb) return 'no_bwb';
+        var container = document.querySelector('.monaco-editor.pine-editor-monaco');
+        if (!container) return 'no_container';
+        if (typeof bwb.hideWidget !== 'function') return 'no_hide_api';
+        bwb.hideWidget('pine-editor');
+        return 'hidden';
+      } catch (e) { return 'threw'; }
     })()
   `);
 
-  if (remounted) {
-    await new Promise(r => setTimeout(r, 400));
-    await evaluate(`
-      (function() {
-        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        if (!bwb) return;
-        if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab();
-        else if (typeof bwb.showWidget === 'function') bwb.showWidget('pine-editor');
-      })()
-    `);
+  if (hideState !== 'hidden') {
+    if (hideState === 'no_bwb') return { ready: false, reason: 'bwb_unavailable' };
+    if (hideState === 'no_container') return { ready: false, reason: 'panel_never_opened' };
+    if (hideState === 'threw') return { ready: false, reason: 'remount_threw' };
+    // 'no_hide_api' — bwb is present but can't tear the panel down. Fall through
+    // and try reopen-by-toolbar-button below; on failure we'll classify as
+    // monaco_not_ready_after_remount since the panel container is still up.
   }
 
-  // Long poll — generous because cold remounts on a slow CDP socket can take
-  // 5–7s. 50 × 200ms = 10s.
+  // Let bwb's hide settle before the reopen — back-to-back hide/show on the same
+  // tick doesn't always trigger a clean re-mount.
+  await new Promise(r => setTimeout(r, 400));
+
+  const reopenState = await evaluate(`
+    (function() {
+      try {
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        if (bwb) {
+          if (typeof bwb.activateScriptEditorTab === 'function') { bwb.activateScriptEditorTab(); return 'activated'; }
+          if (typeof bwb.showWidget === 'function') { bwb.showWidget('pine-editor'); return 'showed'; }
+        }
+        // Fallback: click the right-toolbar Pine button — same DOM path the
+        // initial open uses. Survives a future TV build without bwb.
+        var btn = document.querySelector('[aria-label="Pine"]')
+          || document.querySelector('[data-name="pine-dialog-button"]');
+        if (btn) { btn.click(); return 'clicked'; }
+        return 'no_api';
+      } catch (e) { return 'threw'; }
+    })()
+  `);
+
+  if (reopenState === 'no_api') return { ready: false, reason: 'bwb_unavailable' };
+  if (reopenState === 'threw') return { ready: false, reason: 'remount_threw' };
+
+  // Long poll — generous because cold remounts on a slow CDP socket are
+  // materially slower than a warm mount.
   for (let i = 0; i < 50; i++) {
     await new Promise(r => setTimeout(r, 200));
     if (await probe()) return { ready: true };
   }
 
-  const containerStillPresent = await evaluate(`
-    (function() { return !!document.querySelector('.monaco-editor.pine-editor-monaco'); })()
-  `);
-  return {
-    ready: false,
-    reason: containerStillPresent ? 'monaco_not_ready_after_remount' : 'panel_never_opened',
-  };
+  return { ready: false, reason: 'monaco_not_ready_after_remount' };
 }
 
-/**
- * Wrapper for callers that just want to fail loudly. Surfaces a distinct error
- * for the recoverable "Monaco stuck loading" case so operators see the right
- * remediation hint inline.
- */
+function readinessErrorMessage(r) {
+  if (r.reason === 'monaco_not_ready_after_remount') {
+    return 'Pine Editor panel is open but Monaco never finished loading (pine_editor_monaco_not_ready). ' +
+      'Close the Pine Editor panel in TradingView and reopen it, then retry.';
+  }
+  if (r.reason === 'bwb_unavailable') {
+    return 'Could not open Pine Editor panel: TradingView.bottomWidgetBar API not available.';
+  }
+  if (r.reason === 'remount_threw') {
+    return 'Could not open Pine Editor panel: bwb hide/show raised mid-mount.';
+  }
+  return 'Could not open Pine Editor panel.';
+}
+
 async function ensurePineEditorOpenOrThrow() {
   const r = await ensurePineEditorOpen();
-  if (r.ready) return;
-  if (r.reason === 'monaco_not_ready_after_remount') {
-    throw new Error(
-      'Pine Editor panel is open but Monaco never finished loading (pine_editor_monaco_not_ready). ' +
-      'Close the Pine Editor panel in TradingView and reopen it, then retry.'
-    );
-  }
-  throw new Error('Could not open Pine Editor panel.');
+  if (!r.ready) throw new Error(readinessErrorMessage(r));
 }
 
 // ── Pure / offline functions ──
@@ -547,10 +569,7 @@ async function readActiveScriptIdentity() {
 export async function getActiveScript() {
   const r = await ensurePineEditorOpen();
   if (!r.ready) {
-    const error = r.reason === 'monaco_not_ready_after_remount'
-      ? 'Pine Editor panel is open but Monaco never finished loading (pine_editor_monaco_not_ready). Close the Pine Editor panel in TradingView and reopen it, then retry.'
-      : 'Could not open Pine Editor panel.';
-    return { success: false, error, ...classifyTabState(null) };
+    return { success: false, error: readinessErrorMessage(r), ...classifyTabState(null) };
   }
   return { success: true, ...(await readActiveScriptIdentity()) };
 }
