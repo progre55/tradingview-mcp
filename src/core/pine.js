@@ -26,13 +26,7 @@ const FIND_MONACO = `
         var env = current.memoizedProps.value.monacoEnv;
         if (env.editor && typeof env.editor.getEditors === 'function') {
           var editors = env.editor.getEditors();
-          // A Monaco shell can exist briefly without a bound model — happens
-          // when the editor panel is mid-mount and shows the "Loading…"
-          // spinner. setValue/getValue/getModelMarkers all fail on a modelless
-          // editor, so treat that as not-ready too.
-          if (editors.length > 0 && typeof editors[0].getModel === 'function' && editors[0].getModel()) {
-            return { editor: editors[0], env: env };
-          }
+          if (editors.length > 0) return { editor: editors[0], env: env };
         }
       }
       current = current.return;
@@ -182,22 +176,17 @@ const FIND_PINE_TAB_STATE = `
 `;
 
 /**
- * Opens the Pine Editor panel and waits for Monaco to become available with a
- * bound model. Returns:
- *   { ready: true }
- *   { ready: false, reason: 'monaco_not_ready_after_remount' }  // recoverable
- *   { ready: false, reason: 'panel_never_opened' }              // bwb didn't mount the panel
- *   { ready: false, reason: 'bwb_unavailable' }                 // bottomWidgetBar gone
- *   { ready: false, reason: 'remount_threw' }                   // hide/show raised
- *
- * The remount path mirrors the operator workaround (close+reopen the panel) for
- * the Monaco-stuck-loading case where bwb.showWidget is a no-op on an already
- * visible widget.
+ * Opens the Pine Editor panel and waits for Monaco to become available.
+ * Returns true if editor is accessible, false on timeout.
  */
 export async function ensurePineEditorOpen() {
-  const probe = async () => evaluate(`(function() { return ${FIND_MONACO} !== null; })()`);
-
-  if (await probe()) return { ready: true };
+  const already = await evaluate(`
+    (function() {
+      var m = ${FIND_MONACO};
+      return m !== null;
+    })()
+  `);
+  if (already) return true;
 
   await evaluate(`
     (function() {
@@ -216,91 +205,14 @@ export async function ensurePineEditorOpen() {
     })()
   `);
 
-  // Short poll first — a healthy mount lands well under this budget. Avoid the
-  // heavier remount path for the common case.
-  for (let i = 0; i < 15; i++) {
+  // 75 × 200ms = 15s. Cold-start mounts of Monaco from a fully-closed panel
+  // can exceed the original 10s budget — issue #3 in TV-MCP-ISSUES-v3.md.
+  for (let i = 0; i < 75; i++) {
     await new Promise(r => setTimeout(r, 200));
-    if (await probe()) return { ready: true };
+    const ready = await evaluate(`(function() { return ${FIND_MONACO} !== null; })()`);
+    if (ready) return true;
   }
-
-  // Force remount: programmatic equivalent of the operator clicking X then
-  // reopening the panel. The IIFE catches any throw from bwb.hideWidget so a
-  // mid-mount race doesn't escape the typed return shape.
-  const hideState = await evaluate(`
-    (function() {
-      try {
-        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        if (!bwb) return 'no_bwb';
-        var container = document.querySelector('.monaco-editor.pine-editor-monaco');
-        if (!container) return 'no_container';
-        if (typeof bwb.hideWidget !== 'function') return 'no_hide_api';
-        bwb.hideWidget('pine-editor');
-        return 'hidden';
-      } catch (e) { return 'threw'; }
-    })()
-  `);
-
-  if (hideState !== 'hidden') {
-    if (hideState === 'no_bwb') return { ready: false, reason: 'bwb_unavailable' };
-    if (hideState === 'no_container') return { ready: false, reason: 'panel_never_opened' };
-    if (hideState === 'threw') return { ready: false, reason: 'remount_threw' };
-    // 'no_hide_api' — bwb is present but can't tear the panel down. Fall through
-    // and try reopen-by-toolbar-button below; on failure we'll classify as
-    // monaco_not_ready_after_remount since the panel container is still up.
-  }
-
-  // Let bwb's hide settle before the reopen — back-to-back hide/show on the same
-  // tick doesn't always trigger a clean re-mount.
-  await new Promise(r => setTimeout(r, 400));
-
-  const reopenState = await evaluate(`
-    (function() {
-      try {
-        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        if (bwb) {
-          if (typeof bwb.activateScriptEditorTab === 'function') { bwb.activateScriptEditorTab(); return 'activated'; }
-          if (typeof bwb.showWidget === 'function') { bwb.showWidget('pine-editor'); return 'showed'; }
-        }
-        // Fallback: click the right-toolbar Pine button — same DOM path the
-        // initial open uses. Survives a future TV build without bwb.
-        var btn = document.querySelector('[aria-label="Pine"]')
-          || document.querySelector('[data-name="pine-dialog-button"]');
-        if (btn) { btn.click(); return 'clicked'; }
-        return 'no_api';
-      } catch (e) { return 'threw'; }
-    })()
-  `);
-
-  if (reopenState === 'no_api') return { ready: false, reason: 'bwb_unavailable' };
-  if (reopenState === 'threw') return { ready: false, reason: 'remount_threw' };
-
-  // Long poll — generous because cold remounts on a slow CDP socket are
-  // materially slower than a warm mount.
-  for (let i = 0; i < 50; i++) {
-    await new Promise(r => setTimeout(r, 200));
-    if (await probe()) return { ready: true };
-  }
-
-  return { ready: false, reason: 'monaco_not_ready_after_remount' };
-}
-
-function readinessErrorMessage(r) {
-  if (r.reason === 'monaco_not_ready_after_remount') {
-    return 'Pine Editor panel is open but Monaco never finished loading (pine_editor_monaco_not_ready). ' +
-      'Close the Pine Editor panel in TradingView and reopen it, then retry.';
-  }
-  if (r.reason === 'bwb_unavailable') {
-    return 'Could not open Pine Editor panel: TradingView.bottomWidgetBar API not available.';
-  }
-  if (r.reason === 'remount_threw') {
-    return 'Could not open Pine Editor panel: bwb hide/show raised mid-mount.';
-  }
-  return 'Could not open Pine Editor panel.';
-}
-
-async function ensurePineEditorOpenOrThrow() {
-  const r = await ensurePineEditorOpen();
-  if (!r.ready) throw new Error(readinessErrorMessage(r));
+  return false;
 }
 
 // ── Pure / offline functions ──
@@ -525,7 +437,8 @@ export async function check({ source }) {
 // ── Functions requiring TradingView connection ──
 
 export async function getSource() {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor or Monaco not found in React fiber tree.');
 
   const source = await evaluate(`
     (function() {
@@ -567,15 +480,16 @@ async function readActiveScriptIdentity() {
 // closed (probe needs the React tree mounted) and returns the classified
 // shape. Pure read — does not click, does not mutate the editor.
 export async function getActiveScript() {
-  const r = await ensurePineEditorOpen();
-  if (!r.ready) {
-    return { success: false, error: readinessErrorMessage(r), ...classifyTabState(null) };
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) {
+    return { success: false, error: 'Could not open Pine Editor.', ...classifyTabState(null) };
   }
   return { success: true, ...(await readActiveScriptIdentity()) };
 }
 
 export async function setSource({ source }) {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const escaped = JSON.stringify(source);
   const set = await evaluate(`
@@ -599,7 +513,8 @@ export async function setSource({ source }) {
 }
 
 export async function compile() {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const clicked = await evaluate(`
     (function() {
@@ -643,7 +558,8 @@ export async function compile() {
 }
 
 export async function getErrors() {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const errors = await evaluate(`
     (function() {
@@ -667,7 +583,8 @@ export async function getErrors() {
 }
 
 export async function save() {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   // Identify the tab we're about to save. If the probe can't read it,
   // fail-closed — better than silently saving the wrong tab. Untitled
@@ -732,7 +649,8 @@ export async function save() {
 }
 
 export async function getConsole() {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const entries = await evaluate(`
     (function() {
@@ -781,7 +699,8 @@ export async function getConsole() {
 }
 
 export async function smartCompile({ commit = false } = {}) {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const identity = await readActiveScriptIdentity();
 
@@ -977,7 +896,8 @@ async function attemptNewTab(type) {
 }
 
 export async function newScript({ type }) {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const typeMap = { indicator: 'indicator', strategy: 'strategy', library: 'library' };
   const templates = {
@@ -1067,7 +987,8 @@ export async function newScript({ type }) {
 }
 
 export async function openScript({ name }) {
-  await ensurePineEditorOpenOrThrow();
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const escapedName = JSON.stringify(name.toLowerCase());
 

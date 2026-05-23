@@ -14,9 +14,8 @@ export function registerUiTools(server) {
   server.tool('ui_open_panel', 'Open, close, or toggle TradingView panels (pine-editor, strategy-tester, watchlist, alerts, trading)', {
     panel: z.enum(['pine-editor', 'strategy-tester', 'watchlist', 'alerts', 'trading']).describe('Panel name'),
     action: z.enum(['open', 'close', 'toggle']).describe('Action to perform'),
-    wait_for_ready: z.boolean().optional().describe('When panel="pine-editor" and the action results in an open, wait for Monaco to bind to a model and auto-recover from the stuck-loading state via close+reopen. No-op for other panels. Adds ready/ready_reason to the response.'),
-  }, async ({ panel, action, wait_for_ready }) => {
-    try { return jsonResult(await core.openPanel({ panel, action, wait_for_ready })); }
+  }, async ({ panel, action }) => {
+    try { return jsonResult(await core.openPanel({ panel, action })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
