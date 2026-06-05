@@ -41,6 +41,24 @@ Replace `YOUR_USERNAME` with the user's actual system username. Run `echo $USER`
 
 If the config file already exists and has other servers, merge the `tradingview` entry into the existing `mcpServers` object. Do not overwrite other servers.
 
+### Optional: pin to one chart
+
+By default the server attaches to the first TradingView chart tab, which tracks the last-focused tab — so with several chart tabs open, a client can end up reading a different chart than intended. To lock the server to one specific chart, set `TV_CHART_ID` to the id from the chart URL (`https://www.tradingview.com/chart/<id>/`):
+
+```json
+{
+  "mcpServers": {
+    "tradingview": {
+      "command": "node",
+      "args": ["/path/to/tradingview-mcp/src/server.js"],
+      "env": { "TV_CHART_ID": "<id>" }
+    }
+  }
+}
+```
+
+It **must** go in this `"env"` block — the server does not read a shell `.env`, so a terminal `export TV_CHART_ID=...` will not reach the MCP process. An unknown or closed id falls back to the default (no error), so it's a no-op unless it matches an open chart.
+
 ## Step 4: Launch TradingView Desktop
 
 TradingView Desktop must be running with Chrome DevTools Protocol enabled.

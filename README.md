@@ -111,6 +111,8 @@ Add to `~/.claude/.mcp.json` (merge with any existing servers):
 
 Replace `YOUR_USERNAME` with your actual username. On Mac: `echo $USER` to check.
 
+Running multiple chart tabs and want a client locked to one? Set `TV_CHART_ID` in an `"env"` block — see [Optional: pin to one chart](SETUP_GUIDE.md#optional-pin-to-one-chart) in the setup guide.
+
 ### 5. Verify
 
 Restart Claude Code, then ask: *"Use tv_health_check to verify TradingView is connected"*
@@ -297,6 +299,7 @@ Full command list: `tv --help`
 | `morning_brief` — "No rules.json found" | Run `cp rules.example.json rules.json` and fill it in |
 | `morning_brief` — watchlist empty | Add symbols to the `watchlist` array in `rules.json` |
 | Tools return stale data | TradingView still loading — wait a few seconds |
+| Attaches to the wrong chart (multiple tabs open) | Set `"env": { "TV_CHART_ID": "<id>" }` in `.mcp.json` — id from the `/chart/<id>/` URL |
 | Pine Editor tools fail | Open Pine Editor panel first: `ui_open_panel pine-editor open` |
 
 ---
