@@ -71,9 +71,22 @@ export async function connect() {
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
+  const pages = targets.filter(t => t.type === 'page');
+  // Pin to a specific chart when TV_CHART_ID is set (the id from the
+  // /chart/<id>/ URL). The default below picks the first chart tab, which
+  // tracks the last-focused tab — so with several chart tabs open a client
+  // can attach to a different chart than intended. Setting TV_CHART_ID keeps
+  // a client pinned to one chart regardless of tab focus. An unknown or
+  // closed id falls through to the default rather than failing.
+  const pinned = process.env.TV_CHART_ID;
+  if (pinned) {
+    const re = new RegExp(`/chart/${pinned}(?:[/?#]|$)`, 'i');
+    const match = pages.find(t => /tradingview\.com\/chart/i.test(t.url) && re.test(t.url));
+    if (match) return match;
+  }
   // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-    || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
+  return pages.find(t => /tradingview\.com\/chart/i.test(t.url))
+    || pages.find(t => /tradingview/i.test(t.url))
     || null;
 }
 
