@@ -31,13 +31,13 @@ Add the server to the user's Claude Code MCP configuration. The config file is a
   "mcpServers": {
     "tradingview": {
       "command": "node",
-      "args": ["/Users/YOUR_USERNAME/tradingview-mcp/src/server.js"]
+      "args": ["/path/to/tradingview-mcp/src/server.js"]
     }
   }
 }
 ```
 
-Replace `YOUR_USERNAME` with the user's actual system username. Run `echo $USER` (Mac/Linux) or `echo %USERNAME%` (Windows) to find it.
+Replace `/path/to/tradingview-mcp` with the absolute path to your clone. Run `pwd` from inside the cloned directory to find it.
 
 If the config file already exists and has other servers, merge the `tradingview` entry into the existing `mcpServers` object. Do not overwrite other servers.
 
