@@ -34,7 +34,7 @@ Paste this into Claude Code and it will handle everything:
 ```
 Set up TradingView MCP for me. 
 Clone https://github.com/progre55/tradingview-mcp.git to ~/tradingview-mcp, run npm install, then add it to my MCP config at ~/.claude/.mcp.json (merge with any existing servers, don't overwrite them). 
-The config block is: { "mcpServers": { "tradingview": { "command": "node", "args": ["/Users/YOUR_USERNAME/tradingview-mcp/src/server.js"] } } } — replace YOUR_USERNAME with my actual username.
+The config block is: { "mcpServers": { "tradingview": { "command": "node", "args": ["/path/to/tradingview-mcp/src/server.js"] } } } — replace /path/to/tradingview-mcp with the absolute path to my clone.
 Then copy rules.example.json to rules.json and open it so I can fill in my trading rules.
 Finally restart and verify with tv_health_check.
 ```
@@ -103,13 +103,15 @@ Add to `~/.claude/.mcp.json` (merge with any existing servers):
   "mcpServers": {
     "tradingview": {
       "command": "node",
-      "args": ["/Users/YOUR_USERNAME/tradingview-mcp/src/server.js"]
+      "args": ["/path/to/tradingview-mcp/src/server.js"]
     }
   }
 }
 ```
 
-Replace `YOUR_USERNAME` with your actual username. On Mac: `echo $USER` to check.
+Replace `/path/to/tradingview-mcp` with the absolute path to your clone. Run `pwd` from inside the cloned directory to check.
+
+Running multiple chart tabs and want a client locked to one? Set `TV_CHART_ID` in an `"env"` block — see [Optional: pin to one chart](SETUP_GUIDE.md#optional-pin-to-one-chart) in the setup guide.
 
 ### 5. Verify
 
@@ -297,6 +299,7 @@ Full command list: `tv --help`
 | `morning_brief` — "No rules.json found" | Run `cp rules.example.json rules.json` and fill it in |
 | `morning_brief` — watchlist empty | Add symbols to the `watchlist` array in `rules.json` |
 | Tools return stale data | TradingView still loading — wait a few seconds |
+| Attaches to the wrong chart (multiple tabs open) | Set `"env": { "TV_CHART_ID": "<id>" }` in `.mcp.json` — id from the `/chart/<id>/` URL |
 | Pine Editor tools fail | Open Pine Editor panel first: `ui_open_panel pine-editor open` |
 
 ---
