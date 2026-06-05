@@ -3,7 +3,6 @@
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 import { PANEL_DETECT_JS } from './_panels.js';
-import { ensurePineEditorOpen } from './pine.js';
 
 export async function click({ by, value }) {
   const escaped = JSON.stringify(value);
@@ -30,7 +29,7 @@ export async function click({ by, value }) {
   return { success: true, clicked: result };
 }
 
-export async function openPanel({ panel, action, wait_for_ready }) {
+export async function openPanel({ panel, action }) {
   const isBottomPanel = panel === 'pine-editor' || panel === 'strategy-tester';
   if (isBottomPanel) {
     const widgetName = panel === 'pine-editor' ? 'pine-editor' : 'backtesting';
@@ -59,13 +58,7 @@ export async function openPanel({ panel, action, wait_for_ready }) {
       })()
     `);
     if (result && result.error) throw new Error(result.error);
-    const response = { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
-    if (panel === 'pine-editor' && wait_for_ready && response.performed === 'opened') {
-      const readiness = await ensurePineEditorOpen();
-      response.ready = readiness.ready;
-      response.ready_reason = readiness.reason ?? null;
-    }
-    return response;
+    return { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
   } else {
     const selectorMap = {
       'watchlist': { dataName: 'base-watchlist-widget-button', ariaLabel: 'Watchlist' },
