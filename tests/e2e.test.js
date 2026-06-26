@@ -23,6 +23,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import CDP from 'chrome-remote-interface';
 import * as coreData from '../src/core/data.js';
+import { disconnect as disconnectCore } from '../src/connection.js';
 
 let client;
 let Runtime;
@@ -85,6 +86,10 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
 
   after(async () => {
     if (client) try { await client.close(); } catch {}
+    // Tests that exercise core/* functions (e.g. coreData.getQuote) open the
+    // connection.js singleton CDP socket; close it so the event loop drains and
+    // node --test exits instead of hanging on a pending connection.
+    try { await disconnectCore(); } catch {}
   });
 
   // ─── 1. HEALTH & CONNECTION (4 tools) ─────────────────────────────────
@@ -621,6 +626,36 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       assert.ok(quote.close > 0 || quote.last > 0, 'Has price');
       const quoteSize = JSON.stringify(quote).length;
       assert.ok(quoteSize < 500, `Quote is ${quoteSize} bytes (< 500)`);
+    });
+
+    // The load-bearing regression (off-chart symbol must ERROR, not relabel) is
+    // isolated in its own it() so a happy-path failure can never mask it.
+    it('quote_get — fail-closed on off-chart symbol (regression)', async () => {
+      await assert.rejects(
+        () => coreData.getQuote({ symbol: 'ZZZZ_NOT_ACTIVE' }),
+        /active chart/i,
+        'off-chart symbol rejects with an active-chart message',
+      );
+    });
+
+    it('quote_get — matches active chart symbol (blank / exact / bare ticker)', async (t) => {
+      // Blank symbol → active chart quote, labeled with the canonical symbol.
+      const ok = await coreData.getQuote({});
+      assert.equal(ok.success, true, 'blank symbol succeeds');
+      assert.ok(ok.symbol, 'returns a canonical active chart symbol');
+
+      // The exact active symbol still succeeds and round-trips canonically.
+      const same = await coreData.getQuote({ symbol: ok.symbol });
+      assert.equal(same.success, true, 'matching symbol succeeds');
+      assert.equal(same.symbol, ok.symbol, 'matching symbol returns the canonical symbol');
+
+      // Exchange prefix is optional — the bare ticker matches too.
+      if (ok.symbol.includes(':')) {
+        const bare = await coreData.getQuote({ symbol: ok.symbol.split(':').pop() });
+        assert.equal(bare.success, true, 'bare ticker (no exchange prefix) matches');
+      } else {
+        t.diagnostic(`active symbol "${ok.symbol}" has no exchange prefix — bare-ticker case not exercised`);
+      }
     });
 
     it('depth_get — DOM/order book (panel-dependent)', async () => {

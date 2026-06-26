@@ -364,16 +364,40 @@ export async function getEquity() {
 }
 
 export async function getQuote({ symbol } = {}) {
+  const requested = (symbol || '').trim();
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
-      var sym = '${symbol || ''}';
-      if (!sym) { try { sym = api.symbol(); } catch(e) {} }
-      if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
+      var requested = ${JSON.stringify(requested)};
+      // quote_get reads ONLY the active chart's bars (BARS_PATH below is bound
+      // to _activeChartWidgetWV); there is no non-intrusive internal TV API to
+      // quote an off-chart symbol. So: fail closed (mismatch) when a different
+      // symbol is requested, and otherwise return the chart's CANONICAL symbol
+      // (never the caller's verbatim string) so the label always matches data.
+      var active = '';
+      try { active = api.symbol() || ''; } catch(e) {}
+      if (!active) { try { active = api.symbolExt().symbol || ''; } catch(e) {} }
+      // No readable active symbol (chart loading / mid-transition) — fail closed
+      // rather than return stale bars under an empty label. BARS_PATH can still
+      // resolve here, so the price-presence guard below would not catch it.
+      if (!active) { return { symbol_unavailable: true }; }
+      // Symbol match is exchange-aware and case-insensitive: a bare ticker
+      // matches the active chart's ticker regardless of exchange, but a
+      // requested symbol carrying an explicit "EXCHANGE:" prefix must match in
+      // full — so we never serve one exchange's data under a request for the
+      // same ticker on a different exchange.
+      function up(s) { return (s || '').toUpperCase().trim(); }
+      function ticker(s) { s = up(s); var i = s.indexOf(':'); return i >= 0 ? s.slice(i + 1) : s; }
+      var symbolMatches = requested.indexOf(':') >= 0
+        ? up(requested) === up(active)
+        : ticker(requested) === ticker(active);
+      if (requested && !symbolMatches) {
+        return { mismatch: true, requested: requested, active_symbol: active };
+      }
       var ext = {};
       try { ext = api.symbolExt() || {}; } catch(e) {}
       var bars = ${BARS_PATH};
-      var quote = { symbol: sym };
+      var quote = { symbol: active };
       if (bars && typeof bars.lastIndex === 'function') {
         var last = bars.valueAt(bars.lastIndex());
         if (last) { quote.time = last[0]; quote.open = last[1]; quote.high = last[2]; quote.low = last[3]; quote.close = last[4]; quote.last = last[4]; quote.volume = last[5] || 0; }
@@ -394,6 +418,16 @@ export async function getQuote({ symbol } = {}) {
       return quote;
     })()
   `);
+  if (data && data.symbol_unavailable) {
+    throw new Error('Could not read the active chart symbol (chart loading or mid-transition). Retry shortly.');
+  }
+  if (data && data.mismatch) {
+    throw new Error(
+      `quote_get reads only the active chart (${data.active_symbol || 'unknown'}). ` +
+      `Requested "${data.requested}" is a different symbol. ` +
+      `Switch the chart first with chart_set_symbol("${data.requested}"), then call quote_get with no symbol.`
+    );
+  }
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
   return { success: true, ...data };
 }
