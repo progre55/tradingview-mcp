@@ -31,7 +31,7 @@ TOOL SELECTION GUIDE — use this to pick the right tool:
 Reading your chart:
 - chart_get_state → get symbol, timeframe, all indicator names + entity IDs (call first)
 - data_get_study_values → get current numeric values from ALL visible indicators (RSI, MACD, BB, EMA, etc.)
-- quote_get → get real-time price snapshot (last, OHLC, volume)
+- quote_get → get real-time price snapshot (last, OHLC, volume) for the ACTIVE chart symbol; a non-matching symbol arg errors (fail-closed), never relabels
 - data_get_ohlcv → get price bars. ALWAYS pass summary=true unless you need individual bars
 
 Reading custom Pine indicator output (line.new/label.new/table.new/box.new drawings):
@@ -60,7 +60,7 @@ Drawing: draw_shape → horizontal_line, trend_line, rectangle, text
 Alerts: alert_create, alert_list, alert_delete
 Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
-Tabs: tab_list, tab_new, tab_close, tab_switch
+Tabs: tab_list, tab_new, tab_close, tab_switch (switch by chart_id — preferred, stable — or tab_id; index is fragile)
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv

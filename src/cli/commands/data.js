@@ -2,7 +2,7 @@ import { register } from '../router.js';
 import * as core from '../../core/data.js';
 
 register('quote', {
-  description: 'Get real-time price quote',
+  description: 'Get a real-time quote for the ACTIVE chart symbol (a non-matching symbol errors; chart_set_symbol first to quote another)',
   handler: (opts, positionals) => core.getQuote({ symbol: positionals[0] }),
 });
 
