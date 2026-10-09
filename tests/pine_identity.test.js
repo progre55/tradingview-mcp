@@ -52,6 +52,12 @@ describe('classifyTabState — untitled drafts', () => {
     assert.equal(out.is_saved, false);
   });
 
+  it('TV "Untitled script" (Create new → Indicator on current builds) → untitled', () => {
+    const out = classifyTabState({ script_name: 'Untitled script' });
+    assert.equal(out.is_untitled_draft, true);
+    assert.equal(out.is_saved, false);
+  });
+
   it('STD;NEW_indicator id → untitled (legacy probe path)', () => {
     const out = classifyTabState({ script_id_part: 'STD;NEW_indicator', script_name: 'Untitled', source: 'react_fiber' });
     assert.equal(out.is_untitled_draft, true);
