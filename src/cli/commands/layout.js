@@ -9,10 +9,13 @@ register('layout', {
       handler: () => core.layoutList(),
     }],
     ['switch', {
-      description: 'Switch to a saved layout by name or ID',
+      description: 'Switch to a saved layout by name, ID, or short url',
+      options: {
+        'discard-unsaved': { type: 'boolean', description: 'Drop unsaved changes on the current layout instead of refusing' },
+      },
       handler: (opts, positionals) => {
         if (!positionals[0]) throw new Error('Layout name required. Usage: tv layout switch "My Layout"');
-        return core.layoutSwitch({ name: positionals.join(' ') });
+        return core.layoutSwitch({ name: positionals.join(' '), discard_unsaved: !!opts['discard-unsaved'] });
       },
     }],
   ]),

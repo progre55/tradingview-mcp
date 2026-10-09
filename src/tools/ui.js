@@ -29,10 +29,11 @@ export function registerUiTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('layout_switch', 'Switch to a saved chart layout by name or ID', {
-    name: z.string().describe('Name or ID of the layout to switch to'),
-  }, async ({ name }) => {
-    try { return jsonResult(await core.layoutSwitch({ name })); }
+  server.tool('layout_switch', 'Load a saved chart layout into the attached tab, by name, numeric id, or short url (the /chart/<id>/ part). Verifies the tab URL changed to the target layout; success:false otherwise. Refuses (error "unsaved_changes") when the current layout has unsaved changes unless discard_unsaved is true.', {
+    name: z.string().describe('Name, numeric id, or short url of the layout to switch to'),
+    discard_unsaved: z.boolean().optional().describe('Drop unsaved changes on the current layout instead of refusing (default false)'),
+  }, async ({ name, discard_unsaved }) => {
+    try { return jsonResult(await core.layoutSwitch({ name, discard_unsaved })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

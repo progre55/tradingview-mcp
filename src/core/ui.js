@@ -119,47 +119,114 @@ export async function layoutList() {
   return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [], error: layouts?.error };
 }
 
-export async function layoutSwitch({ name }) {
-  const escaped = JSON.stringify(name);
-  const result = await evaluateAsync(`
+/**
+ * Pure: pick a saved layout for `query` from getSavedCharts() entries.
+ * Order: numeric id or short url (exact) → exact name → case-insensitive name
+ * → case-insensitive substring, only when exactly one layout contains it.
+ * Returns { match, candidates }; candidates lists an ambiguous substring hit.
+ */
+export function matchSavedLayout(charts, query) {
+  const none = { match: null, candidates: [] };
+  if (!Array.isArray(charts) || query == null) return none;
+  const q = String(query).trim();
+  if (!q) return none;
+  const ql = q.toLowerCase();
+  const nameOf = c => c.name || c.title || '';
+  const exact = charts.find(c => String(c.id) === q || c.url === q)
+    || charts.find(c => nameOf(c) === q)
+    || charts.find(c => nameOf(c).toLowerCase() === ql);
+  if (exact) return { match: exact, candidates: [] };
+  const partial = charts.filter(c => nameOf(c).toLowerCase().includes(ql));
+  if (partial.length === 1) return { match: partial[0], candidates: [] };
+  return { match: null, candidates: partial.map(nameOf) };
+}
+
+export async function layoutSwitch({ name, discard_unsaved = false }) {
+  const saved = await evaluateAsync(`
     new Promise(function(resolve) {
       try {
-        var target = ${escaped};
-        if (/^\\d+$/.test(target)) { window.TradingViewApi.loadChartFromServer(target); resolve({success: true, method: 'loadChartFromServer', id: target, source: 'internal_api'}); return; }
         window.TradingViewApi.getSavedCharts(function(charts) {
-          if (!charts || !Array.isArray(charts)) { resolve({success: false, error: 'getSavedCharts returned no data', source: 'internal_api'}); return; }
-          var match = null;
-          for (var i = 0; i < charts.length; i++) { var cname = charts[i].name || charts[i].title || ''; if (cname === target || cname.toLowerCase() === target.toLowerCase()) { match = charts[i]; break; } }
-          if (!match) { for (var j = 0; j < charts.length; j++) { var cn = (charts[j].name || charts[j].title || '').toLowerCase(); if (cn.indexOf(target.toLowerCase()) !== -1) { match = charts[j]; break; } } }
-          if (!match) { resolve({success: false, error: 'Layout "' + target + '" not found.', source: 'internal_api'}); return; }
-          var chartId = match.id || match.chartId;
-          window.TradingViewApi.loadChartFromServer(chartId);
-          resolve({success: true, method: 'loadChartFromServer', id: chartId, name: match.name || match.title, source: 'internal_api'});
+          if (!Array.isArray(charts)) { resolve({ error: 'getSavedCharts returned no data' }); return; }
+          resolve({ charts: charts.map(function(c) { return { id: c.id, url: c.url, name: c.name || c.title || '' }; }) });
         });
-        setTimeout(function() { resolve({success: false, error: 'getSavedCharts timed out', source: 'internal_api'}); }, 5000);
-      } catch(e) { resolve({success: false, error: e.message, source: 'internal_api'}); }
+        setTimeout(function() { resolve({ error: 'getSavedCharts timed out' }); }, 5000);
+      } catch (e) { resolve({ error: e.message }); }
     })
   `);
-  if (!result?.success) throw new Error(result?.error || 'Unknown error switching layout');
+  if (saved?.error) throw new Error(saved.error);
+  const { match, candidates } = matchSavedLayout(saved.charts, name);
+  if (!match && candidates.length) return { success: false, error: `Layout "${name}" is ambiguous.`, candidates };
+  if (!match) return { success: false, error: `Layout "${name}" not found.`, available: saved.charts.map(c => c.name) };
+  if (!match.url) return { success: false, error: `Layout "${match.name}" has no short url; cannot load it.`, layout_id: match.id };
 
-  // Handle "unsaved changes" confirmation dialog
-  await new Promise(r => setTimeout(r, 500));
-  const dismissed = await evaluate(`
-    (function() {
-      var btns = document.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/open anyway|don't save|discard/i.test(text)) {
-          btns[i].click();
-          return true;
-        }
+  // loadChartFromServer(id) is a silent no-op: it hands the bare id to
+  // loadChart(), which expects a chart-list entry. loadChartByUrl resolves the
+  // entry itself and throws when the layout isn't opened. Its 3rd argument
+  // skips the unsaved-changes prompt, which discards those changes.
+  const load = await evaluateAsync(`
+    (async function() {
+      var api = window.TradingViewApi;
+      var hc = null;
+      try { hc = api._saveChartService.hasChanges(); if (hc && typeof hc.value === 'function') hc = hc.value(); } catch (e) {}
+      var discard = ${discard_unsaved ? 'true' : 'false'};
+      // Unknown counts as unsaved: loadChartByUrl would otherwise block on its modal.
+      if (hc !== false && !discard) return { unsaved: true, unknown: hc !== true };
+      if (!api._loadChartService || typeof api._loadChartService.loadChartByUrl !== 'function') {
+        return { error: 'loadChartByUrl is not available on this build' };
       }
-      return false;
+      try {
+        await Promise.race([
+          api._loadChartService.loadChartByUrl(${JSON.stringify(match.url)}, undefined, discard),
+          new Promise(function(_, reject) { setTimeout(function() { reject(new Error('loadChartByUrl timed out after 15s')); }, 15000); }),
+        ]);
+        return { ok: true };
+      } catch (e) { return { error: e && e.message ? e.message : String(e) }; }
     })()
   `);
+  if (load?.unsaved) {
+    return {
+      success: false,
+      error: 'unsaved_changes',
+      detail: load.unknown
+        ? 'Could not read whether the current layout has unsaved changes. Save it first, or pass discard_unsaved:true.'
+        : 'The current layout has unsaved changes. Save it first, or pass discard_unsaved:true to drop them.',
+      layout: match.name,
+    };
+  }
+  if (load?.error) return { success: false, error: load.error, layout: match.name, layout_id: match.id };
 
-  if (dismissed) await new Promise(r => setTimeout(r, 1000));
-  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dismissed };
+  const expected = `/chart/${match.url}/`;
+  const deadline = Date.now() + 5000;
+  let state = null;
+  while (Date.now() < deadline) {
+    try {
+      state = await evaluate(`
+        (function() {
+          var r = { path: location.pathname };
+          try { var c = window.TradingViewApi._activeChartWidgetWV.value(); r.symbol = c.symbol(); r.resolution = c.resolution(); } catch (e) {}
+          return r;
+        })()
+      `);
+    } catch { /* page mid-navigation; retry */ }
+    if (state?.path === expected) break;
+    await new Promise(r => setTimeout(r, 250));
+  }
+  if (state?.path !== expected) {
+    return { success: false, error: 'layout did not load', expected_path: expected, actual_path: state?.path ?? null, layout: match.name };
+  }
+  const result = {
+    success: true,
+    action: 'switched',
+    layout: match.name,
+    layout_id: match.id,
+    chart_id: match.url,
+    symbol: state.symbol ?? null,
+    resolution: state.resolution ?? null,
+  };
+  if (process.env.TV_CHART_ID && process.env.TV_CHART_ID !== match.url) {
+    result.note = `TV_CHART_ID pins "${process.env.TV_CHART_ID}"; after a reconnect the session resolves to that chart, not this tab. Use tab_switch with chart_id "${match.url}".`;
+  }
+  return result;
 }
 
 export async function keyboard({ key, modifiers }) {
