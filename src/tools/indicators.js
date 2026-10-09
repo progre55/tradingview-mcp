@@ -3,11 +3,13 @@ import { jsonResult } from './_format.js';
 import * as core from '../core/indicators.js';
 
 export function registerIndicatorTools(server) {
-  server.tool('indicator_set_inputs', 'Change indicator/study input values. Override keys are matched against input id, Pine variable name, or display title (case-insensitive). Returns updated_inputs (id-keyed map of what was applied), unmatched_keys (overrides that didn\'t match any input), and input_keys — a list of descriptor objects {id, name, title, current_value} for every input the study exposes (the caller can use any of id / name / title as a future override key). When a non-empty inputs object yields zero matches, the call returns success:false rather than the previous silent no-op.', {
+  server.tool('indicator_set_inputs', 'Change indicator/study input values. Override keys match the input id (e.g. "in_3") or display title (e.g. "Slow EMA"), case-insensitive; Pine variable names only work on built-ins that expose them. Waits for the study to finish recalculating (recalc: completed | error | timeout | skipped_no_change | not_waited) so a following data_get_strategy_results / data_get_trades reads the new run. Returns updated_inputs, current_values (read back after the change), unmatched_keys; input_keys ({id, title, group, value}, hidden inputs excluded) only when keys didn\'t match or verbose:true. Zero matches → success:false.', {
     entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
-    inputs: z.string().describe('JSON string of input overrides, e.g. \'{"length": 50, "source": "close"}\'. Keys can be the input id, the Pine variable name (e.g. "macro_required"), or the display title (e.g. "Require macro alignment").'),
-  }, async ({ entity_id, inputs }) => {
-    try { return jsonResult(await core.setInputs({ entity_id, inputs })); }
+    inputs: z.string().describe('JSON string of input overrides, e.g. \'{"in_3": 20, "Slow EMA": 50}\'. Keys can be the input id or the display title.'),
+    verbose: z.boolean().optional().describe('Always include input_keys (default false)'),
+    wait_ms: z.coerce.number().optional().describe('Max ms to wait for the recalculation to finish (default 30000). 0 returns immediately; a strategy read right after can then still see the previous run, because the recalc may not have started yet.'),
+  }, async ({ entity_id, inputs, verbose, wait_ms }) => {
+    try { return jsonResult(await core.setInputs({ entity_id, inputs, verbose, wait_ms })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

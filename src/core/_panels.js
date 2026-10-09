@@ -149,6 +149,14 @@ function findStrategySource() {
 // Requires STRATEGY_DETECTOR_JS earlier (uses findStrategySource debug
 // for fallback diagnostics).
 export const STRATEGY_DATA_FN = `
+function strategyCalcStatus(s) {
+  try {
+    if (typeof s.isFailed === 'function' && s.isFailed()) return 'error';
+    if (typeof s.isLoading === 'function' && s.isLoading()) return 'loading';
+    if (typeof s.isCompleted === 'function' && s.isCompleted()) return 'completed';
+  } catch (e) {}
+  return 'unknown';
+}
 function findActiveStrategy() {
   var debug = { strategies_seen: [] };
   try {
@@ -166,9 +174,14 @@ function findActiveStrategy() {
       try { rd = typeof s.reportData === 'function' ? s.reportData() : null; } catch(e) {}
       try { od = typeof s.ordersData === 'function' ? s.ordersData() : null; } catch(e) {}
       if (!firstStrategy) firstStrategy = { source: s, name: name };
-      if (rd) return { source: s, name: name, reportData: rd, ordersData: od, debug: debug };
+      if (rd) return { source: s, name: name, reportData: rd, ordersData: od, calc_status: strategyCalcStatus(s), debug: debug };
     }
-    return { source: null, first_strategy_name: firstStrategy ? firstStrategy.name : null, debug: debug };
+    return {
+      source: null,
+      first_strategy_name: firstStrategy ? firstStrategy.name : null,
+      calc_status: firstStrategy ? strategyCalcStatus(firstStrategy.source) : null,
+      debug: debug,
+    };
   } catch (e) {
     return { source: null, debug: { error: e.message, strategies_seen: debug.strategies_seen } };
   }

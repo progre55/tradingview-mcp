@@ -11,7 +11,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveInputOverrides } from '../src/core/indicators.js';
+import { resolveInputOverrides, buildInputDescriptors } from '../src/core/indicators.js';
 
 const FIXTURE = [
   { id: 'in_0', name: 'macro_required', title: 'Require macro alignment', current_value: true },
@@ -81,5 +81,48 @@ describe('resolveInputOverrides — key resolution', () => {
     const { matched, unmatched_keys } = resolveInputOverrides([], { length: 10 });
     assert.deepEqual(matched, []);
     assert.deepEqual(unmatched_keys, ['length']);
+  });
+});
+
+describe('buildInputDescriptors — getInputValues() joined with metaInfo().inputs', () => {
+  // getInputValues() carries only {id, value}; titles live in metaInfo.
+  const VALUES = [
+    { id: 'text', value: 'x'.repeat(50000) },
+    { id: 'pineId', value: 'USER;abc123' },
+    { id: 'in_0', value: 9 },
+    { id: 'in_1', value: 'y'.repeat(300) },
+  ];
+  const META = [
+    { id: 'text', name: 'ILScript', isHidden: true },
+    { id: 'pineId', name: 'pineId', isHidden: true },
+    { id: 'in_0', name: 'Fast EMA', group: 'Framework', type: 'integer' },
+    { id: 'in_1', name: 'Notes', type: 'string' },
+  ];
+
+  it('drops hidden inputs (the encoded script blob made responses tens of KB)', () => {
+    const ids = buildInputDescriptors(VALUES, META).map(d => d.id);
+    assert.deepEqual(ids, ['in_0', 'in_1']);
+  });
+
+  it('populates title/group/type from metaInfo', () => {
+    const [first] = buildInputDescriptors(VALUES, META);
+    assert.deepEqual(first, { id: 'in_0', name: null, title: 'Fast EMA', group: 'Framework', type: 'integer', current_value: 9 });
+  });
+
+  it('truncates long string values', () => {
+    const notes = buildInputDescriptors(VALUES, META).find(d => d.id === 'in_1');
+    assert.equal(notes.current_value.length, 201);
+    assert.ok(notes.current_value.endsWith('…'));
+  });
+
+  it('a display-title override resolves to the in_N id', () => {
+    const { matched, unmatched_keys } = resolveInputOverrides(buildInputDescriptors(VALUES, META), { 'fast ema': 12 });
+    assert.deepEqual(matched, [{ id: 'in_0', key: 'fast ema', value: 12 }]);
+    assert.deepEqual(unmatched_keys, []);
+  });
+
+  it('missing metaInfo keeps every input with null titles', () => {
+    const out = buildInputDescriptors([{ id: 'length', value: 14 }], null);
+    assert.deepEqual(out, [{ id: 'length', name: null, title: null, group: null, type: null, current_value: 14 }]);
   });
 });
