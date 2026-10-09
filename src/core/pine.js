@@ -35,6 +35,22 @@ const FIND_MONACO = `
   })()
 `;
 
+const READ_MARKERS_JS = `
+  (function() {
+    var m = ${FIND_MONACO};
+    if (!m) return [];
+    var model = m.editor.getModel();
+    if (!model) return [];
+    var markers = m.env.editor.getModelMarkers({ resource: model.uri });
+    return markers.map(function(mk) {
+      return { line: mk.startLineNumber, column: mk.startColumn, message: mk.message, severity: mk.severity };
+    });
+  })()
+`;
+
+// Monaco's MarkerSeverity.Error.
+const MARKER_SEVERITY_ERROR = 8;
+
 // ── Pine-editor active-tab probe ──
 // TradingView's UI exposes the active script's identity through three signals
 // (live-probed against the current build):
@@ -338,7 +354,7 @@ export function analyze({ source }) {
 // is_saved is true when there's a name AND it's not untitled.
 // A null raw result maps to both flags false — callers fail-closed rather
 // than guess.
-const UNTITLED_NAME_RE = /^untitled (indicator|strategy|library)\b/i;
+const UNTITLED_NAME_RE = /^untitled (indicator|strategy|library|script)\b/i;
 const DEFAULT_TEMPLATE_NAMES = new Set(['My script', 'My strategy', 'MyLibrary']);
 
 export function classifyTabState(raw) {
@@ -561,18 +577,7 @@ export async function getErrors() {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const errors = await evaluate(`
-    (function() {
-      var m = ${FIND_MONACO};
-      if (!m) return [];
-      var model = m.editor.getModel();
-      if (!model) return [];
-      var markers = m.env.editor.getModelMarkers({ resource: model.uri });
-      return markers.map(function(mk) {
-        return { line: mk.startLineNumber, column: mk.startColumn, message: mk.message, severity: mk.severity };
-      });
-    })()
-  `);
+  const errors = await evaluate(READ_MARKERS_JS);
 
   return {
     success: true,
@@ -598,6 +603,9 @@ export async function save() {
       script_name: null,
     };
   }
+
+  const chartBefore = await readChartStudyForScript(identity.script_id);
+  const versionBefore = identity.is_untitled_draft ? null : await resolveSavedVersion(identity);
 
   // Click the Pine Editor's save button directly (Ctrl+S saves the chart layout, not the script)
   const clicked = await evaluate(`
@@ -637,15 +645,117 @@ export async function save() {
     if (dialog === 'dialog_visible_no_button') break;
   }
 
-  if (dialogHandled) await new Promise(r => setTimeout(r, 500));
+  // Same settle budget as smartCompile's commit path: markers and the
+  // saved version land asynchronously after the click.
+  await new Promise(r => setTimeout(r, 2500));
 
+  const markers = await evaluate(READ_MARKERS_JS);
   const after = await readActiveScriptIdentity();
-  return {
-    success: true,
+  const chartAfter = await readChartStudyForScript(after.script_id || identity.script_id);
+  const versionAfter = await resolveSavedVersion(after);
+  const outcome = classifySaveOutcome({
+    markers,
+    wasDirty: identity.is_dirty,
+    versionBefore,
+    versionAfter,
+    studyCompileError: chartAfter?.compile_error === true,
+    wasUntitled: identity.is_untitled_draft,
+    stillUntitled: after.is_untitled_draft,
+  });
+  const result = {
+    success: outcome.ok,
     action: dialogHandled ? 'saved_with_dialog' : 'saved',
     script_id: after.script_id || identity.script_id,
     script_name: after.script_name || identity.script_name,
+    version_before: versionBefore,
+    version_after: versionAfter,
+    version_verified: outcome.version_verified,
   };
+  if (!outcome.ok) {
+    result.action = 'save_failed';
+    result.error = outcome.error;
+    if (outcome.errors) result.errors = outcome.errors;
+    result.detail = outcome.error === 'draft_not_saved'
+      ? 'The untitled draft is still untitled after the save attempt (the save/rename dialog was not confirmed); nothing was saved.'
+      : 'TradingView may still have stored the source in the cloud, but the chart keeps running the previous compiled version.';
+  }
+  if (chartBefore?.digest && chartAfter?.digest) result.chart_updated = chartBefore.digest !== chartAfter.digest;
+  return result;
+}
+
+/**
+ * Pure: decide whether a pine_save click actually produced a saved, compiling
+ * version. Fails on Monaco error markers, on a compile error reported by the
+ * script's on-chart study, when a dirty script's version didn't move, or when
+ * an untitled draft is still untitled afterwards (nothing was saved).
+ * Unknown versions don't fail the save; they surface as version_verified:false.
+ */
+export function classifySaveOutcome({ markers, wasDirty, versionBefore, versionAfter, studyCompileError, wasUntitled, stillUntitled }) {
+  const errors = (Array.isArray(markers) ? markers : []).filter(m => m && m.severity === MARKER_SEVERITY_ERROR);
+  const versionKnown = versionBefore != null && versionAfter != null;
+  const version_verified = versionKnown && String(versionBefore) !== String(versionAfter);
+  if (wasUntitled && stillUntitled) return { ok: false, error: 'draft_not_saved', version_verified };
+  if (errors.length) return { ok: false, error: 'compile_errors', errors, version_verified };
+  if (studyCompileError) return { ok: false, error: 'study_compile_error', version_verified };
+  if (wasDirty && versionKnown && !version_verified) return { ok: false, error: 'version_not_bumped', version_verified };
+  return { ok: true, version_verified };
+}
+
+/**
+ * Pure: a saved script's version from the pine-facade list, by id, else by
+ * name when exactly one saved script carries it. Null when unresolved.
+ */
+export function lookupSavedVersion(scripts, { script_id, script_name } = {}) {
+  const list = Array.isArray(scripts) ? scripts : [];
+  if (script_id) {
+    const byId = list.find(s => s.id === script_id);
+    if (byId) return byId.version ?? null;
+  }
+  if (script_name) {
+    const byName = list.filter(s => s.name === script_name);
+    if (byName.length === 1) return byName[0].version ?? null;
+  }
+  return null;
+}
+
+// Always read from the saved list: the editor probe's version is sniffed from
+// the GET made when the tab loaded and doesn't move after a save.
+async function resolveSavedVersion(identity) {
+  try {
+    const { scripts } = await listScripts();
+    return lookupSavedVersion(scripts, identity);
+  } catch {
+    return null;
+  }
+}
+
+// The on-chart study running `scriptId` (matched by its hidden pineId input),
+// or null when the script isn't on the active chart.
+async function readChartStudyForScript(scriptId) {
+  if (!scriptId) return null;
+  try {
+    return await evaluate(`
+      (function() {
+        var w = window.TradingViewApi._activeChartWidgetWV.value();
+        var sources = w._chartWidget.model().model().dataSources();
+        for (var i = 0; i < sources.length; i++) {
+          var s = sources[i];
+          var meta = null;
+          try { meta = s.metaInfo(); } catch (e) {}
+          if (!meta || !meta.pine) continue;
+          var pineId = null;
+          try { pineId = w.getStudyById(s.id()).getInputValues().find(function(v) { return v.id === 'pineId'; }).value; } catch (e) {}
+          if (pineId !== ${JSON.stringify(scriptId)}) continue;
+          var ce = false;
+          try { ce = !!(s.hasCompileError && s.hasCompileError()); } catch (e) {}
+          return { digest: meta.pine.digest || null, version: meta.pine.version || null, compile_error: ce };
+        }
+        return null;
+      })()
+    `);
+  } catch {
+    return null;
+  }
 }
 
 export async function getConsole() {
@@ -655,47 +765,31 @@ export async function getConsole() {
   const entries = await evaluate(`
     (function() {
       var results = [];
-      var rows = document.querySelectorAll('[class*="consoleRow"], [class*="log-"], [class*="consoleLine"]');
-      if (rows.length === 0) {
-        var bottomArea = document.querySelector('[class*="layout__area--bottom"]')
-          || document.querySelector('[class*="bottom-widgetbar-content"]');
-        if (bottomArea) {
-          rows = bottomArea.querySelectorAll('[class*="message"], [class*="log"], [class*="console"]');
-        }
-      }
-      if (rows.length === 0) {
-        var pinePanel = document.querySelector('.pine-editor-container')
-          || document.querySelector('[class*="pine-editor"]')
-          || document.querySelector('[class*="layout__area--bottom"]');
-        if (pinePanel) {
-          var allSpans = pinePanel.querySelectorAll('span, div');
-          for (var s = 0; s < allSpans.length; s++) {
-            var txt = allSpans[s].textContent.trim();
-            if (/^\\d{2}:\\d{2}:\\d{2}/.test(txt) || /error|warning|info/i.test(allSpans[s].className)) {
-              rows = Array.from(rows || []);
-              rows.push(allSpans[s]);
-            }
-          }
-        }
-      }
+      // Pine Logs is a right-sidebar widget on current builds. Avoid bare
+      // [class*="log-"]: it substring-matches "dialog-" and used to scrape the
+      // whole Pine editor (line numbers + source) as if it were log output.
+      var widget = document.querySelector('.widgetbar-widget-pine_logs');
+      if (!widget) return { panel_found: false, entries: [] };
+      var rows = widget.querySelectorAll('[class*="logContainer-"]');
       for (var i = 0; i < rows.length; i++) {
-        var text = rows[i].textContent.trim();
+        var text = (rows[i].textContent || '').trim();
         if (!text) continue;
         var ts = null;
-        var tsMatch = text.match(/^(\\d{4}-\\d{2}-\\d{2}\\s+)?\\d{2}:\\d{2}:\\d{2}/);
-        if (tsMatch) ts = tsMatch[0];
-        var type = 'info';
-        var cls = rows[i].className || '';
-        if (/error/i.test(cls) || /error/i.test(text.substring(0, 30))) type = 'error';
-        else if (/compil/i.test(text.substring(0, 40))) type = 'compile';
-        else if (/warn/i.test(cls)) type = 'warning';
+        var m = text.match(/^\\[([^\\]]+)\\]:\\s*/);
+        if (m) { ts = m[1]; text = text.slice(m[0].length); }
+        var cls = String(rows[i].className || '') + ' ' + String((rows[i].parentElement || {}).className || '');
+        var type = /error/i.test(cls) ? 'error' : /warn/i.test(cls) ? 'warning' : 'info';
         results.push({ timestamp: ts, type: type, message: text });
       }
-      return results;
+      return { panel_found: true, entries: results };
     })()
   `);
 
-  return { success: true, entries: entries || [], entry_count: entries?.length || 0 };
+  if (!entries?.panel_found) {
+    return { success: false, error: 'pine_logs_panel_not_found', detail: 'Open Pine Logs first (Pine Editor → More → Pine Logs). The script must be on the chart with log.* calls.', entries: [], entry_count: 0 };
+  }
+  // The panel is a virtual scroller: only rendered rows are visible here.
+  return { success: true, entries: entries.entries, entry_count: entries.entries.length };
 }
 
 export async function smartCompile({ commit = false } = {}) {
@@ -777,18 +871,7 @@ export async function smartCompile({ commit = false } = {}) {
 
   await new Promise(r => setTimeout(r, 2500));
 
-  const errors = await evaluate(`
-    (function() {
-      var m = ${FIND_MONACO};
-      if (!m) return [];
-      var model = m.editor.getModel();
-      if (!model) return [];
-      var markers = m.env.editor.getModelMarkers({ resource: model.uri });
-      return markers.map(function(mk) {
-        return { line: mk.startLineNumber, column: mk.startColumn, message: mk.message, severity: mk.severity };
-      });
-    })()
-  `);
+  const errors = await evaluate(READ_MARKERS_JS);
 
   const studiesAfter = await evaluate(`
     (function() {

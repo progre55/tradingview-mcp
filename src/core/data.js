@@ -149,22 +149,69 @@ export async function getIndicator({ entity_id }) {
   return { success: true, entity_id, visible: data?.visible, inputs };
 }
 
-export async function getStrategyResults() {
+const DEFAULT_STRATEGY_WAIT_MS = 15000;
+
+/**
+ * Pure: true while the strategy's report can't be trusted yet — the study is
+ * recalculating, or (right after a Pine save) the report is back but the
+ * strategy's name/metrics haven't been repopulated.
+ */
+export function strategyNotReady(api) {
+  if (!api) return false;
+  if (api.calc_status === 'loading') return true;
+  return !!api.populated && !api.strategy_name;
+}
+
+async function pollStrategyApi(read, wait_ms) {
+  const waitMs = wait_ms == null ? DEFAULT_STRATEGY_WAIT_MS : Math.max(0, Number(wait_ms) || 0);
+  const deadline = Date.now() + waitMs;
+  let api = await read();
+  while (strategyNotReady(api) && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 300));
+    api = await read();
+  }
+  return api;
+}
+
+// Pure: the failure to return instead of the report, or null to use it.
+// A nameless report that is otherwise complete is used once the wait expires.
+export function strategyBlocker(api) {
+  if (!api) return null;
+  if (api.calc_status === 'loading') return 'strategy_recalculating';
+  if (api.calc_status === 'error') return 'strategy_calc_error';
+  if (api.populated && !api.strategy_name && api.calc_status !== 'completed') return 'strategy_recalculating';
+  return null;
+}
+
+function recalculatingResult(api, error) {
+  return {
+    success: false,
+    error,
+    detail: error === 'strategy_calc_error'
+      ? 'The strategy\'s last calculation failed; its report would be the previous run.'
+      : 'The strategy is still recalculating; its report would be the previous run. Retry, or pass a larger wait_ms.',
+    calc_status: api.calc_status,
+    strategy_name: api.strategy_name || api.first_strategy_name || null,
+  };
+}
+
+export async function getStrategyResults({ wait_ms } = {}) {
   // Path 1 (primary): read strat.reportData() directly. Non-intrusive — does
   // not toggle the bottom panel or shift any tab. Only populates when the
   // strategy is currently selected in the Strategy Tester for backtesting.
-  const api = await evaluate(`
+  const api = await pollStrategyApi(() => evaluate(`
     (function() {
       ${STRATEGY_DATA_FN}
       try {
         var hit = findActiveStrategy();
         if (!hit.source || !hit.reportData) {
-          return { populated: false, source: 'internal_api', diagnostic: hit.debug, first_strategy_name: hit.first_strategy_name };
+          return { populated: false, source: 'internal_api', calc_status: hit.calc_status, diagnostic: hit.debug, first_strategy_name: hit.first_strategy_name };
         }
         var mapped = mapPerformanceMetrics(hit.reportData);
         return {
           populated: true,
           source: 'internal_api',
+          calc_status: hit.calc_status,
           strategy_name: hit.name,
           metrics: mapped.metrics,
           long: mapped.long,
@@ -173,13 +220,17 @@ export async function getStrategyResults() {
         };
       } catch(e) { return { populated: false, source: 'internal_api', error: e.message }; }
     })()
-  `);
+  `), wait_ms);
+
+  const blocker = strategyBlocker(api);
+  if (blocker) return recalculatingResult(api, blocker);
 
   if (api?.populated && api.metrics && Object.keys(api.metrics).length >= 5) {
     return {
       success: true,
       metric_count: Object.keys(api.metrics).length,
       source: 'internal_api',
+      calc_status: api.calc_status,
       strategy_name: api.strategy_name,
       currency: api.currency,
       metrics: api.metrics,
@@ -232,6 +283,7 @@ export async function getStrategyResults() {
       success: true,
       metric_count: Object.keys(dom.metrics).length,
       source: 'dom_scrape',
+      calc_status: api?.calc_status ?? null,
       metrics: dom.metrics,
       api_attempt: { populated: false, diagnostic: api?.diagnostic, first_strategy_name: api?.first_strategy_name },
     };
@@ -242,6 +294,7 @@ export async function getStrategyResults() {
     success: true,
     metric_count: 0,
     source: 'none',
+    calc_status: api?.calc_status ?? null,
     metrics: {},
     error: dom?.reason || api?.error || 'no_metrics',
     api_diagnostic: api?.diagnostic,
@@ -249,25 +302,28 @@ export async function getStrategyResults() {
   };
 }
 
-export async function getTrades({ max_trades, settle_ms } = {}) {
+export async function getTrades({ max_trades, settle_ms, wait_ms } = {}) {
   const limit = Math.min(max_trades || 100, MAX_TRADES);
 
   // Path 1 (primary): read strat.reportData().trades directly. Synchronous,
   // non-intrusive (no panel open, no scrolling), returns the full list.
-  const api = await evaluate(`
+  const api = await pollStrategyApi(() => evaluate(`
     (function() {
       ${STRATEGY_DATA_FN}
       try {
         var hit = findActiveStrategy();
         if (!hit.source || !hit.reportData || !hit.reportData.trades) {
-          return { populated: false, source: 'internal_api', diagnostic: hit.debug, first_strategy_name: hit.first_strategy_name };
+          return { populated: false, source: 'internal_api', calc_status: hit.calc_status, diagnostic: hit.debug, first_strategy_name: hit.first_strategy_name };
         }
         var rawTrades = hit.reportData.trades;
         var projected = rawTrades.map(function(t, i) { return projectInternalTrade(t, i); });
-        return { populated: true, source: 'internal_api', strategy_name: hit.name, trades: projected, currency: hit.reportData.currency || null };
+        return { populated: true, source: 'internal_api', calc_status: hit.calc_status, strategy_name: hit.name, trades: projected, currency: hit.reportData.currency || null };
       } catch(e) { return { populated: false, source: 'internal_api', error: e.message }; }
     })()
-  `);
+  `), wait_ms);
+
+  const blocker = strategyBlocker(api);
+  if (blocker) return recalculatingResult(api, blocker);
 
   if (api?.populated && Array.isArray(api.trades)) {
     let trades = api.trades;
@@ -278,6 +334,7 @@ export async function getTrades({ max_trades, settle_ms } = {}) {
       trade_count: trades.length,
       total_scraped: total,
       source: 'internal_api',
+      calc_status: api.calc_status,
       strategy_name: api.strategy_name,
       currency: api.currency,
       trades,
@@ -318,6 +375,7 @@ export async function getTrades({ max_trades, settle_ms } = {}) {
     trade_count: trades.length,
     total_scraped: total,
     source: result?.source || 'dom_scrape',
+    calc_status: api?.calc_status ?? null,
     virtualized: result?.virtualized,
     scrolls: result?.scrolls,
     trades,

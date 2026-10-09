@@ -1,7 +1,7 @@
 /**
  * Core indicator settings logic.
  */
-import { evaluate } from '../connection.js';
+import { evaluate, evaluateAsync } from '../connection.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -67,90 +67,149 @@ export function resolveInputOverrides(currentInputs, overrides) {
   return { matched, unmatched_keys };
 }
 
-export async function setInputs({ entity_id, inputs: inputsRaw }) {
+const MAX_INPUT_STRING = 200;
+
+/**
+ * Pure: merge getInputValues() ({id, value}) with metaInfo().inputs (which
+ * carries the display title as `name`, plus group/type/isHidden) into the
+ * descriptors callers resolve against. Hidden inputs are dropped — on Pine
+ * scripts they include the encoded IL source blob (`text`), which alone made
+ * responses tens of KB. Pine variable names aren't exposed for user scripts.
+ */
+export function buildInputDescriptors(values, metaInputs) {
+  const metaById = new Map((Array.isArray(metaInputs) ? metaInputs : []).map(m => [m.id, m]));
+  const out = [];
+  for (const v of Array.isArray(values) ? values : []) {
+    if (!v || v.id == null) continue;
+    const meta = metaById.get(v.id) || {};
+    if (meta.isHidden) continue;
+    let value = v.value;
+    if (typeof value === 'string' && value.length > MAX_INPUT_STRING) value = value.slice(0, MAX_INPUT_STRING) + '…';
+    out.push({
+      id: v.id,
+      name: v.name ?? null,
+      title: meta.name ?? v.title ?? v.inline ?? null,
+      group: meta.group ?? null,
+      type: meta.type ?? null,
+      current_value: value,
+    });
+  }
+  return out;
+}
+
+export async function setInputs({ entity_id, inputs: inputsRaw, verbose = false, wait_ms = 30000 }) {
   const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
   if (!entity_id) throw new Error('entity_id is required. Use chart_get_state to find study IDs.');
   if (!inputs || typeof inputs !== 'object' || Object.keys(inputs).length === 0) {
     throw new Error('inputs must be a non-empty object, e.g. { length: 50 }');
   }
 
-  const escapedId = entity_id.replace(/'/g, "\\'");
+  const escapedId = JSON.stringify(entity_id);
+  const findSource = `
+    var chart = ${CHART_API};
+    var study = chart.getStudyById(${escapedId});
+    var src = null;
+    try { src = chart._chartWidget.model().model().dataSources().find(function(s) { try { return s.id() === ${escapedId}; } catch (e) { return false; } }) || null; } catch (e) {}
+  `;
 
-  // First trip into the page: read the full input descriptor list.
-  const descriptor = await evaluate(`
+  const raw = await evaluate(`
     (function() {
-      var chart = ${CHART_API};
-      var study = chart.getStudyById('${escapedId}');
-      if (!study) return { error: 'Study not found: ${escapedId}' };
-      var current = study.getInputValues();
-      return {
-        inputs: current.map(function(inp) {
-          return {
-            id: inp.id,
-            name: inp.name || null,
-            title: inp.title || inp.inline || null,
-            current_value: inp.value,
-          };
-        })
-      };
+      ${findSource}
+      if (!study) return { error: 'Study not found: ' + ${escapedId} };
+      var meta = null;
+      try { meta = src && src.metaInfo().inputs.map(function(m) { return { id: m.id, name: m.name, group: m.group, type: m.type, isHidden: !!m.isHidden }; }); } catch (e) {}
+      return { values: study.getInputValues(), meta: meta };
     })()
   `);
+  if (raw && raw.error) throw new Error(raw.error);
+  const currentInputs = buildInputDescriptors(raw?.values, raw?.meta);
+  const compactKeys = () => currentInputs.map(d => ({ id: d.id, title: d.title, group: d.group, value: d.current_value }));
 
-  if (descriptor && descriptor.error) throw new Error(descriptor.error);
-  const currentInputs = descriptor?.inputs || [];
-
-  // Resolve caller keys against id / name / title.
   const { matched, unmatched_keys } = resolveInputOverrides(currentInputs, inputs);
-  const idKeyedOverrides = {};
-  for (const m of matched) idKeyedOverrides[m.id] = m.value;
-
-  // Surface the full input descriptors regardless of outcome — each is
-  // `{id, name, title, current_value}`, and callers can use any of id /
-  // name / title as a future override key. Field name is `input_keys` for
-  // backward compatibility with the existing tool surface; the descriptor
-  // shape is documented in the tool description.
-  const input_keys = currentInputs;
-
   if (matched.length === 0) {
     return {
       success: false,
-      error: 'no input keys matched; see input_keys for the valid identifiers',
+      error: 'no input keys matched; see input_keys for the valid identifiers (id or title)',
       entity_id,
       updated_inputs: {},
       unmatched_keys,
-      input_keys,
+      input_keys: compactKeys(),
     };
   }
+  const idKeyedOverrides = {};
+  for (const m of matched) idKeyedOverrides[m.id] = m.value;
 
-  // Second trip: apply the resolved id-keyed overrides.
-  const inputsJson = JSON.stringify(idKeyedOverrides);
-  const result = await evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      var study = chart.getStudyById('${escapedId}');
-      if (!study) return { error: 'Study not found: ${escapedId}' };
-      var currentInputs = study.getInputValues();
-      var overrides = ${inputsJson};
-      var updatedKeys = {};
-      for (var i = 0; i < currentInputs.length; i++) {
-        if (overrides.hasOwnProperty(currentInputs[i].id)) {
-          currentInputs[i].value = overrides[currentInputs[i].id];
-          updatedKeys[currentInputs[i].id] = overrides[currentInputs[i].id];
+  // Subscribe to the study's status before setInputValues so a fast
+  // Loading → Completed cycle can't slip past; otherwise a read straight
+  // after this call returns the previous run's strategy report.
+  const waitMs = Math.max(0, Number(wait_ms) || 0);
+  const result = await evaluateAsync(`
+    (async function() {
+      ${findSource}
+      if (!study) return { error: 'Study not found: ' + ${escapedId} };
+      var overrides = ${JSON.stringify(idKeyedOverrides)};
+      var waitMs = ${waitMs};
+      var values = study.getInputValues();
+      var updated = {};
+      var changed = false;
+      for (var i = 0; i < values.length; i++) {
+        if (Object.prototype.hasOwnProperty.call(overrides, values[i].id)) {
+          if (JSON.stringify(values[i].value) !== JSON.stringify(overrides[values[i].id])) changed = true;
+          values[i].value = overrides[values[i].id];
+          updated[values[i].id] = overrides[values[i].id];
         }
       }
-      study.setInputValues(currentInputs);
-      return { updated_inputs: updatedKeys };
+      function readBack() {
+        var now = {};
+        study.getInputValues().forEach(function(v) { if (Object.prototype.hasOwnProperty.call(updated, v.id)) now[v.id] = v.value; });
+        return now;
+      }
+      if (!changed) return { updated_inputs: updated, recalc: 'skipped_no_change', current_values: readBack() };
+      if (waitMs === 0 || !src || typeof src.onStatusChanged !== 'function' || typeof src.isCompleted !== 'function') {
+        study.setInputValues(values);
+        return { updated_inputs: updated, recalc: 'not_waited', current_values: readBack() };
+      }
+      var t0 = Date.now();
+      var recalc = await new Promise(function(resolve) {
+        var sawRunning = false;
+        var delegate = src.onStatusChanged();
+        var timer = null;
+        function finish(r) { clearTimeout(timer); try { delegate.unsubscribe(null, onStatus); } catch (e) {} resolve(r); }
+        // A failed/completed status from before the change is stale until a
+        // non-completed status has been seen.
+        function onStatus() {
+          try {
+            if (!src.isCompleted()) {
+              if (sawRunning && typeof src.isFailed === 'function' && src.isFailed()) return finish('error');
+              sawRunning = true;
+              return;
+            }
+            if (sawRunning) finish('completed');
+          } catch (e) { finish('error'); }
+        }
+        delegate.subscribe(null, onStatus);
+        timer = setTimeout(function() { finish('timeout'); }, waitMs);
+        study.setInputValues(values);
+        onStatus();
+      });
+      return { updated_inputs: updated, recalc: recalc, recalc_ms: Date.now() - t0, current_values: readBack() };
     })()
   `);
-
   if (result && result.error) throw new Error(result.error);
-  return {
+
+  const out = {
     success: true,
     entity_id,
     updated_inputs: result.updated_inputs,
+    current_values: result.current_values,
     unmatched_keys,
-    input_keys,
+    recalc: result.recalc,
   };
+  if (result.recalc_ms != null) out.recalc_ms = result.recalc_ms;
+  if (result.recalc === 'timeout') out.warning = `study did not finish recalculating within ${waitMs}ms; results read now may still be stale`;
+  if (result.recalc === 'error') out.warning = 'study reported an error after the input change';
+  if (verbose || unmatched_keys.length) out.input_keys = compactKeys();
+  return out;
 }
 
 export async function toggleVisibility({ entity_id, visible }) {

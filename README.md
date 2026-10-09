@@ -236,10 +236,10 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `pine_set_source` | 1. Inject code into editor |
 | `pine_smart_compile` | 2. Compile with auto-detection + error check |
 | `pine_get_errors` | 3. Read compilation errors if any |
-| `pine_get_console` | 4. Read log.info() output |
+| `pine_get_console` | 4. Read log.info() output (Pine Logs panel must be open) |
 | `pine_save` | 5. Save to TradingView cloud |
 | `pine_analyze` | Offline static analysis (no chart needed) |
-| `pine_check` | Server-side compile check (no chart needed) |
+| `pine_check` | Server-side compile check (no chart needed; not identical to the editor compiler) |
 
 ### Replay Mode
 

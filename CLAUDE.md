@@ -48,9 +48,9 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 2. `pine_set_source` → inject code into editor (returns `script_id` / `script_name`)
 3. `pine_smart_compile` → **non-destructive by default** — compiles via the `pine-facade /translate_light` API, returns errors/warnings, **does not save**. Pass `commit:true` to ALSO click "Save and add to chart" (DESTRUCTIVE — bumps a saved script's version).
 4. `pine_get_errors` → read compilation errors
-5. `pine_get_console` → read log.info() output
+5. `pine_get_console` → read log.info() output from the Pine Logs panel (must be open: Pine Editor → More → Pine Logs; `success: false` with `pine_logs_panel_not_found` otherwise)
 6. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts; returns `script_id` / `script_name`)
-7. `pine_save` → save to TradingView cloud (fail-closes when active-tab identity can't be read)
+7. `pine_save` → save to TradingView cloud (fail-closes when active-tab identity can't be read). Post-checked: `success: false` with `compile_errors` (Monaco error markers), `study_compile_error`, `version_not_bumped`, or `draft_not_saved` (an untitled draft is still untitled afterwards). A failed save may still store the source in TV cloud; the chart keeps the previous compiled version.
 8. `pine_new` → create a fresh untitled tab. Auto-opens the editor panel if closed. Returns `success: false` with the active script's identity if a saved script remains active after the attempt — caller must switch tabs manually in that case.
 9. `pine_open` → load a saved script by name
 
@@ -82,7 +82,9 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 ### "Navigate the UI"
 - `ui_open_panel` → open/close pine-editor, strategy-tester, watchlist, alerts, trading
 - `ui_click` → click buttons by aria-label, text, or data-name
-- `layout_switch` → load a saved layout by name
+- `layout_switch` → load a saved layout by name, numeric id, or short url into the attached tab (via `_loadChartService.loadChartByUrl`; `loadChartFromServer(id)` is a silent no-op). Verifies the tab URL became `/chart/<url>/`. Refuses with `unsaved_changes` unless `discard_unsaved: true`.
+- `tab_new` → open a chart tab via the Desktop tab strip's "New tab" button + new-tab launcher ("Create new layout" by default, or a recent/favorite `layout` by name). Returns the new `tab_id` / `chart_id`; does not repoint the CDP session, so `tab_switch` to it next.
+- `tab_close` → close the attached tab via the tab strip (Cmd/Ctrl+W is a no-op on current builds); verifies the target is gone.
 - `ui_fullscreen` → toggle fullscreen
 - `capture_screenshot` → take a screenshot (regions: "full", "chart", "strategy_tester")
 
@@ -136,7 +138,9 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - `pine_smart_compile` is **non-destructive by default** (`commit:false`) — compiles via `pine-facade /translate_light` and returns errors/warnings without touching the chart or saved-scripts list. Pass `commit:true` to also click "Save and add to chart" (DESTRUCTIVE — bumps a saved user script's version on TV cloud). The "Pine Save" fallback path was the v3 data-loss accident and has been removed.
 - `pine_new` is post-condition checked: it confirms the active tab is a fresh untitled draft (`is_untitled_draft: true`) before injecting the template. If a saved user script remains active after the new-tab attempt, the call returns `success: false` with `active_script_id` / `active_script_name`. Auto-opens the editor panel if closed (15s budget).
 - All editor write tools (`pine_set_source`, `pine_compile`, `pine_save`, `pine_smart_compile`, `pine_new`, `pine_open`, `pine_get_source`) attach `script_id` and `script_name` to their return. `pine_get_active_script` is a zero-side-effect probe that returns `{script_id, script_name, version, is_saved, is_dirty, source}` — call it before any destructive op to verify identity.
-- `indicator_set_inputs` resolves override keys against input `id`, Pine variable `name`, or display `title` (case-insensitive). Returns `updated_inputs` (id-keyed map of what was applied), `unmatched_keys` (overrides that didn't match), and `input_keys` (every valid identifier for the study). When a non-empty `inputs` object yields zero matches, the call returns `success: false` rather than a silent no-op.
+- `indicator_set_inputs` resolves override keys against input `id` or display `title` (case-insensitive; titles come from `metaInfo().inputs`, Pine variable names are not exposed for user scripts). It waits for the study's recalculation to finish (`recalc: completed | error | timeout | skipped_no_change | not_waited`, bounded by `wait_ms`, default 30000) so a following strategy read sees the new run. `wait_ms: 0` opts out, and then readers cannot tell a recalc that hasn't started yet. Returns `updated_inputs`, `current_values` (read back after the change), and `unmatched_keys`. `input_keys` (`{id, title, group, value}`, hidden inputs such as the encoded script blob excluded) is only included when keys didn't match or with `verbose: true`. Zero matches → `success: false`.
+- `data_get_strategy_results` / `data_get_trades` report `calc_status` and wait up to `wait_ms` (default 15000) while the strategy is recalculating. If it hasn't finished, they return `success: false, error: 'strategy_recalculating'` instead of the previous run's numbers.
+- `pine_check` uses the Guest `translate_light` endpoint, which is not identical to the editor compiler (e.g. it accepts ISO-8601 `timestamp("2026-07-10T14:20:00Z")`, which the editor rejects with CE10275). A pass is necessary but not sufficient; `pine_save` / `pine_get_errors` are authoritative.
 - `chart_scroll_to_date` and `chart_set_visible_range` self-verify after firing `zoomToBarsRange`: if the requested target is not inside the resulting visible range (or the chart didn't move at all), the response is `success: false` with `actual`, `moved`, and a reason. TV's public `setVisibleRange` / `setVisibleTimeRange` / `loadRange` are `Not implemented` on the current Desktop build, so out-of-range historical dates require operator-driven scrolling first.
 
 ## Architecture

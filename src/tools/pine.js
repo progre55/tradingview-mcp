@@ -25,12 +25,12 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S)', {}, async () => {
+  server.tool('pine_save', 'Save the current Pine Script via the editor Save button, then verify: success:false with error "compile_errors" (Monaco error markers, returned in errors), "study_compile_error" (the on-chart study reports one), "version_not_bumped" (a dirty script whose saved version didn\'t change), or "draft_not_saved" (an untitled draft is still untitled afterwards). A failed save may still have stored the source in TV cloud; the chart keeps the previous compiled version. version_verified:false means the version couldn\'t be read, not that the save failed.', {}, async () => {
     try { return jsonResult(await core.save()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_get_console', 'Read Pine Script console/log output (compile messages, log.info(), errors)', {}, async () => {
+  server.tool('pine_get_console', 'Read rendered entries from the Pine Logs panel (log.info/warning/error output) as {timestamp, type, message}. The panel must be open (Pine Editor → More → Pine Logs) and the script on the chart; success:false error "pine_logs_panel_not_found" otherwise. The panel is virtualized, so only rendered rows are returned.', {}, async () => {
     try { return jsonResult(await core.getConsole()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
@@ -73,7 +73,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_check', 'Compile Pine Script via TradingView\'s server API without needing the chart open. Returns compilation errors/warnings. Useful for validating code before injecting into the chart.', {
+  server.tool('pine_check', 'Compile Pine Script via TradingView\'s server API (Guest translate_light) without needing the chart open. Returns compilation errors/warnings. NOT identical to the editor compiler — e.g. it accepts ISO-8601 timestamp("2026-07-10T14:20:00Z"), which the editor rejects — so a pass is necessary but not sufficient. pine_save / pine_get_errors are authoritative.', {
     source: z.string().describe('Pine Script source code to compile/validate'),
   }, async ({ source }) => {
     try { return jsonResult(await core.check({ source })); }

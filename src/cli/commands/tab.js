@@ -9,8 +9,11 @@ register('tab', {
       handler: () => core.list(),
     }],
     ['new', {
-      description: 'Open a new chart tab',
-      handler: () => core.newTab(),
+      description: 'Open a new chart tab (new layout, or --layout <name> from the launcher)',
+      options: {
+        layout: { type: 'string', description: 'Recent/favorite layout name shown in the new-tab launcher' },
+      },
+      handler: (opts) => core.newTab({ layout: opts.layout }),
     }],
     ['close', {
       description: 'Close the current tab',

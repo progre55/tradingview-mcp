@@ -18,16 +18,19 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_strategy_results', 'Get strategy Performance Summary metrics (PF, WR, Net Profit, Total Closed Trades, Max Drawdown, etc.). Auto-opens Strategy Tester. Returns source="dom_scrape" or "internal_api"; "none" with diagnostics if both paths fail.', {}, async () => {
-    try { return jsonResult(await core.getStrategyResults()); }
+  server.tool('data_get_strategy_results', 'Get strategy Performance Summary metrics (PF, WR, Net Profit, Total Closed Trades, Max Drawdown, etc.). Auto-opens Strategy Tester. Returns source="dom_scrape" or "internal_api"; "none" with diagnostics if both paths fail. Waits while the strategy is recalculating (calc_status "loading") and returns success:false error "strategy_recalculating" instead of the previous run\'s numbers if it doesn\'t finish within wait_ms.', {
+    wait_ms: z.coerce.number().optional().describe('Max ms to wait for an in-progress recalculation (default 15000; 0 = no wait)'),
+  }, async ({ wait_ms }) => {
+    try { return jsonResult(await core.getStrategyResults({ wait_ms })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_trades', 'Get the full trade list from Strategy Tester (auto-opens panel, auto-scrolls through virtualized rows). Each trade has trade_num, type/signal entry+exit, entry_time, exit_time, entry_price, exit_price, contracts, pnl_usd, pnl_pct, run_up_usd/pct, drawdown_usd/pct.', {
+  server.tool('data_get_trades', 'Get the full trade list from Strategy Tester (auto-opens panel, auto-scrolls through virtualized rows). Each trade has trade_num, type/signal entry+exit, entry_time, exit_time, entry_price, exit_price, contracts, pnl_usd, pnl_pct, run_up_usd/pct, drawdown_usd/pct. Waits while the strategy is recalculating; success:false error "strategy_recalculating" if it doesn\'t finish within wait_ms.', {
     max_trades: z.coerce.number().optional().describe('Maximum trades to return (default 100, max 500). The scraper still walks the entire table; this only caps the output array.'),
     settle_ms: z.coerce.number().optional().describe('Per-scroll settle delay in ms (default 350, clamped 150–1500). Increase for slower machines or large trade counts.'),
-  }, async ({ max_trades, settle_ms }) => {
-    try { return jsonResult(await core.getTrades({ max_trades, settle_ms })); }
+    wait_ms: z.coerce.number().optional().describe('Max ms to wait for an in-progress recalculation (default 15000; 0 = no wait)'),
+  }, async ({ max_trades, settle_ms, wait_ms }) => {
+    try { return jsonResult(await core.getTrades({ max_trades, settle_ms, wait_ms })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

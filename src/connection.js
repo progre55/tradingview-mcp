@@ -18,7 +18,7 @@ const KNOWN_PATHS = {
   mainSeriesBars: 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()',
   // Phase 1: Strategy data — model().dataSources() → find strategy → .performance().value(), .ordersData(), .reportData()
   strategyStudy: 'chart._chartWidget.model().model().dataSources()',
-  // Phase 2: Layouts — getSavedCharts(cb), loadChartFromServer(id)
+  // Phase 2: Layouts — getSavedCharts(cb), _loadChartService.loadChartByUrl(shortUrl)
   layoutManager: 'window.TradingViewApi.getSavedCharts',
   // Phase 5: Symbol search — searchSymbols(query) returns Promise
   symbolSearchApi: 'window.TradingViewApi.searchSymbols',

@@ -10,7 +10,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveTarget } from '../src/core/tab.js';
+import { resolveTarget, diffNewTabs } from '../src/core/tab.js';
 
 // Mirrors the shape list() returns. Note tab[1] and tab[3] share a chart_id to
 // exercise the duplicate-chart collision path.
@@ -112,5 +112,20 @@ describe('resolveTarget — empty / missing input', () => {
   it('empty tabs list throws', () => {
     assert.throws(() => resolveTarget([], { chart_id: 'x' }), /No TradingView chart tabs found/);
     assert.throws(() => resolveTarget(undefined, { index: 0 }), /No TradingView chart tabs found/);
+  });
+});
+
+describe('diffNewTabs — tab_new post-condition', () => {
+  it('no new target id → empty (tab_new must report failure)', () => {
+    assert.deepEqual(diffNewTabs(['AAA', 'BBB'], [{ id: 'BBB' }, { id: 'AAA' }]), []);
+  });
+
+  it('finds the new target regardless of list order', () => {
+    const after = [{ id: 'NEW', chart_id: 'chartN' }, { id: 'AAA' }, { id: 'BBB' }];
+    assert.deepEqual(diffNewTabs(['AAA', 'BBB'], after), [{ id: 'NEW', chart_id: 'chartN' }]);
+  });
+
+  it('a closed tab plus an opened one still detects the opened one (count unchanged)', () => {
+    assert.deepEqual(diffNewTabs(['AAA', 'BBB'], [{ id: 'AAA' }, { id: 'NEW' }]).map(t => t.id), ['NEW']);
   });
 });
