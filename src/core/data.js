@@ -283,6 +283,7 @@ export async function getStrategyResults({ wait_ms } = {}) {
       success: true,
       metric_count: Object.keys(dom.metrics).length,
       source: 'dom_scrape',
+      calc_status: api?.calc_status ?? null,
       metrics: dom.metrics,
       api_attempt: { populated: false, diagnostic: api?.diagnostic, first_strategy_name: api?.first_strategy_name },
     };
@@ -293,6 +294,7 @@ export async function getStrategyResults({ wait_ms } = {}) {
     success: true,
     metric_count: 0,
     source: 'none',
+    calc_status: api?.calc_status ?? null,
     metrics: {},
     error: dom?.reason || api?.error || 'no_metrics',
     api_diagnostic: api?.diagnostic,
@@ -373,6 +375,7 @@ export async function getTrades({ max_trades, settle_ms, wait_ms } = {}) {
     trade_count: trades.length,
     total_scraped: total,
     source: result?.source || 'dom_scrape',
+    calc_status: api?.calc_status ?? null,
     virtualized: result?.virtualized,
     scrolls: result?.scrolls,
     trades,

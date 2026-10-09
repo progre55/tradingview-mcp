@@ -40,6 +40,17 @@ describe('classifySaveOutcome', () => {
     assert.deepEqual(classifySaveOutcome({ markers: [], wasDirty: true, versionBefore: null, versionAfter: '1.0' }), { ok: true, version_verified: false });
   });
 
+  it('an untitled draft that is still untitled afterwards fails even with unknown versions', () => {
+    const r = classifySaveOutcome({ markers: [], wasDirty: true, versionBefore: null, versionAfter: null, wasUntitled: true, stillUntitled: true });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'draft_not_saved');
+  });
+
+  it('an untitled draft that got a name counts as saved', () => {
+    const r = classifySaveOutcome({ markers: [], wasDirty: true, versionBefore: null, versionAfter: '1.0', wasUntitled: true, stillUntitled: false });
+    assert.deepEqual(r, { ok: true, version_verified: false });
+  });
+
   it('a compile error on the on-chart study fails', () => {
     assert.equal(classifySaveOutcome({ markers: [], wasDirty: true, versionBefore: '1.0', versionAfter: '2.0', studyCompileError: true }).error, 'study_compile_error');
   });

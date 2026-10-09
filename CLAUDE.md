@@ -50,7 +50,7 @@ Each returned study includes a `state` field: **`has_shapes`** (the indicator ha
 4. `pine_get_errors` → read compilation errors
 5. `pine_get_console` → read log.info() output from the Pine Logs panel (must be open: Pine Editor → More → Pine Logs; `success: false` with `pine_logs_panel_not_found` otherwise)
 6. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts; returns `script_id` / `script_name`)
-7. `pine_save` → save to TradingView cloud (fail-closes when active-tab identity can't be read). Post-checked: `success: false` with `compile_errors` (Monaco error markers), `study_compile_error`, or `version_not_bumped`. A failed save may still store the source in TV cloud; the chart keeps the previous compiled version.
+7. `pine_save` → save to TradingView cloud (fail-closes when active-tab identity can't be read). Post-checked: `success: false` with `compile_errors` (Monaco error markers), `study_compile_error`, `version_not_bumped`, or `draft_not_saved` (an untitled draft is still untitled afterwards). A failed save may still store the source in TV cloud; the chart keeps the previous compiled version.
 8. `pine_new` → create a fresh untitled tab. Auto-opens the editor panel if closed. Returns `success: false` with the active script's identity if a saved script remains active after the attempt — caller must switch tabs manually in that case.
 9. `pine_open` → load a saved script by name
 

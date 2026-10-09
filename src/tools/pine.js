@@ -25,7 +25,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script via the editor Save button, then verify: success:false with error "compile_errors" (Monaco error markers, returned in errors), "study_compile_error" (the on-chart study reports one), or "version_not_bumped" (a dirty script whose saved version didn\'t change). A failed save may still have stored the source in TV cloud; the chart keeps the previous compiled version. version_verified:false means the version couldn\'t be read, not that the save failed.', {}, async () => {
+  server.tool('pine_save', 'Save the current Pine Script via the editor Save button, then verify: success:false with error "compile_errors" (Monaco error markers, returned in errors), "study_compile_error" (the on-chart study reports one), "version_not_bumped" (a dirty script whose saved version didn\'t change), or "draft_not_saved" (an untitled draft is still untitled afterwards). A failed save may still have stored the source in TV cloud; the chart keeps the previous compiled version. version_verified:false means the version couldn\'t be read, not that the save failed.', {}, async () => {
     try { return jsonResult(await core.save()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });

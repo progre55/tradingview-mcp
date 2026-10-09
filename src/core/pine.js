@@ -659,6 +659,8 @@ export async function save() {
     versionBefore,
     versionAfter,
     studyCompileError: chartAfter?.compile_error === true,
+    wasUntitled: identity.is_untitled_draft,
+    stillUntitled: after.is_untitled_draft,
   });
   const result = {
     success: outcome.ok,
@@ -673,7 +675,9 @@ export async function save() {
     result.action = 'save_failed';
     result.error = outcome.error;
     if (outcome.errors) result.errors = outcome.errors;
-    result.detail = 'TradingView may still have stored the source in the cloud, but the chart keeps running the previous compiled version.';
+    result.detail = outcome.error === 'draft_not_saved'
+      ? 'The untitled draft is still untitled after the save attempt (the save/rename dialog was not confirmed); nothing was saved.'
+      : 'TradingView may still have stored the source in the cloud, but the chart keeps running the previous compiled version.';
   }
   if (chartBefore?.digest && chartAfter?.digest) result.chart_updated = chartBefore.digest !== chartAfter.digest;
   return result;
@@ -682,13 +686,15 @@ export async function save() {
 /**
  * Pure: decide whether a pine_save click actually produced a saved, compiling
  * version. Fails on Monaco error markers, on a compile error reported by the
- * script's on-chart study, or when a dirty script's version didn't move.
+ * script's on-chart study, when a dirty script's version didn't move, or when
+ * an untitled draft is still untitled afterwards (nothing was saved).
  * Unknown versions don't fail the save; they surface as version_verified:false.
  */
-export function classifySaveOutcome({ markers, wasDirty, versionBefore, versionAfter, studyCompileError }) {
+export function classifySaveOutcome({ markers, wasDirty, versionBefore, versionAfter, studyCompileError, wasUntitled, stillUntitled }) {
   const errors = (Array.isArray(markers) ? markers : []).filter(m => m && m.severity === MARKER_SEVERITY_ERROR);
   const versionKnown = versionBefore != null && versionAfter != null;
   const version_verified = versionKnown && String(versionBefore) !== String(versionAfter);
+  if (wasUntitled && stillUntitled) return { ok: false, error: 'draft_not_saved', version_verified };
   if (errors.length) return { ok: false, error: 'compile_errors', errors, version_verified };
   if (studyCompileError) return { ok: false, error: 'study_compile_error', version_verified };
   if (wasDirty && versionKnown && !version_verified) return { ok: false, error: 'version_not_bumped', version_verified };
