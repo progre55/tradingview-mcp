@@ -1,8 +1,9 @@
 /**
  * Core tab management logic.
- * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
+ * Controls TradingView Desktop tabs via CDP and the Desktop tab strip.
  */
-import { getClient, evaluate, attachToTarget } from '../connection.js';
+import CDP from 'chrome-remote-interface';
+import { evaluate, getTargetInfo, attachToTarget } from '../connection.js';
 
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
@@ -28,58 +29,192 @@ export async function list() {
 }
 
 /**
- * Open a new chart tab via keyboard shortcut (Ctrl+T / Cmd+T).
+ * Pure: the targets in `afterTabs` whose CDP id wasn't in `beforeIds`.
+ * Compares by id, not count or position — /json/list order is recency-based.
  */
-export async function newTab() {
-  const c = await getClient();
+export function diffNewTabs(beforeIds, afterTabs) {
+  const before = new Set(beforeIds);
+  return (afterTabs || []).filter(t => !before.has(t.id));
+}
 
-  // Electron/TradingView Desktop uses Ctrl+T for new tab on macOS too
-  // But some versions use Cmd+T
-  const isMac = process.platform === 'darwin';
-  const mod = isMac ? 4 : 2; // 4 = meta (Cmd), 2 = ctrl
+async function listAllTargets() {
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  return resp.json();
+}
 
-  await c.Input.dispatchKeyEvent({
-    type: 'keyDown',
-    modifiers: mod,
-    key: 't',
-    code: 'KeyT',
-    windowsVirtualKeyCode: 84,
-  });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 't', code: 'KeyT' });
+// Desktop chrome (tab strip, new-tab launcher) renders in its own file:// pages,
+// not in any chart page, so clicks there need a dedicated short-lived CDP
+// session. Never reuses the shared client in connection.js.
+async function evaluateOnTarget(target, expression) {
+  const c = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
+  try {
+    const r = await c.Runtime.evaluate({ expression, returnByValue: true });
+    if (r.exceptionDetails) return { ok: false, reason: r.exceptionDetails.text || 'eval_error' };
+    return { ok: true, value: r.result?.value };
+  } finally {
+    try { await c.close(); } catch { /* already gone */ }
+  }
+}
 
-  await new Promise(r => setTimeout(r, 2000));
+// With several Desktop windows we can't tell which tab strip owns a target,
+// and clicking ".tab.active" in the wrong one closes an unrelated tab.
+async function evaluateOnShell(expression) {
+  const shells = (await listAllTargets()).filter(t => t.type === 'page' && /app\/window\/index\.html/.test(t.url));
+  if (!shells.length) return { ok: false, reason: 'desktop_shell_target_not_found' };
+  if (shells.length > 1) return { ok: false, reason: 'multiple_desktop_windows_unsupported' };
+  return evaluateOnTarget(shells[0], expression);
+}
 
-  // Verify a new tab appeared
-  const state = await list();
-  return { success: true, action: 'new_tab_opened', ...state };
+async function poll(fn, predicate, timeoutMs, intervalMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  let state = await fn();
+  while (!predicate(state) && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    state = await fn();
+  }
+  return state;
+}
+
+// Foregrounds `target`, confirms via `readVisibility` that it is the visible
+// page (only the foreground tab reports "visible"), then clicks the active
+// tab's close button in the Desktop tab strip and waits for the target to go.
+async function closeTargetViaShell(target, readVisibility) {
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
+  if (!resp.ok) return { success: false, error: `failed to activate tab: HTTP ${resp.status}` };
+  const visible = await poll(readVisibility, v => v === 'visible', 3000);
+  if (visible !== 'visible') {
+    return { success: false, error: 'tab did not become the foreground tab; refusing to click close' };
+  }
+  const clicked = await evaluateOnShell(`
+    (function() {
+      var btn = document.querySelector('.tab.active .tab-close-button');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()
+  `);
+  if (!clicked.ok || !clicked.value) {
+    return { success: false, error: 'active tab close button not found in Desktop tab strip', reason: clicked.reason };
+  }
+  const gone = await poll(listAllTargets, ts => !ts.some(t => t.id === target.id), 5000);
+  if (gone.some(t => t.id === target.id)) {
+    return { success: false, error: 'tab is still open after clicking close (an unsaved-changes prompt may be showing)' };
+  }
+  return { success: true };
 }
 
 /**
- * Close the current tab via keyboard shortcut (Ctrl+W / Cmd+W).
+ * Open a new chart tab. On current Desktop builds a synthetic Cmd/Ctrl+T on a
+ * chart page is a no-op (the accelerator belongs to Electron's main-process
+ * menu), so this clicks the tab strip's "New tab" button, which opens a
+ * launcher page, then picks "Create new layout" or the named layout card.
+ */
+export async function newTab({ layout } = {}) {
+  const beforeTargets = await listAllTargets();
+  const beforeIds = beforeTargets.map(t => t.id);
+  const before = await list();
+
+  const clicked = await evaluateOnShell(`
+    (function() {
+      var btn = document.querySelector('button[aria-label="New tab"], button[title="New tab"]');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()
+  `);
+  if (!clicked.ok || !clicked.value) {
+    return { success: false, error: 'Desktop "New tab" button not found', reason: clicked.reason };
+  }
+
+  const launcher = (await poll(
+    async () => (await listAllTargets()).find(t => !beforeIds.includes(t.id) && /app\/new-tab\/index\.html/.test(t.url)),
+    t => !!t,
+    5000,
+  ));
+  if (!launcher) {
+    return { success: false, error: 'new-tab launcher did not appear', tabs_before: before.tab_count };
+  }
+
+  // The launcher renders asynchronously; retry until its layout list exists.
+  const pick = await poll(
+    () => evaluateOnTarget(launcher, `
+      (function() {
+        var want = ${JSON.stringify(layout ?? null)};
+        var list = document.querySelector('.layout-list');
+        if (!list) return { ready: false };
+        if (want === null) {
+          var create = list.querySelector('.create-new-layout-button');
+          if (!create) return { ready: true, clicked: false, reason: 'create_new_layout_button_not_found' };
+          create.click();
+          return { ready: true, clicked: true, picked: 'create_new_layout' };
+        }
+        var cards = Array.from(list.querySelectorAll('li.layout-list-item:not(.create-new-layout-button)'));
+        if (!cards.length) return { ready: false };
+        var names = cards.map(function(li) { var n = li.querySelector('.layout-list-item-info span'); return n ? n.textContent.trim() : ''; });
+        var idx = names.indexOf(want);
+        if (idx < 0) idx = names.map(function(n) { return n.toLowerCase(); }).indexOf(want.toLowerCase());
+        if (idx < 0) return { ready: true, clicked: false, reason: 'layout_not_in_launcher', visible_layouts: names };
+        cards[idx].click();
+        return { ready: true, clicked: true, picked: names[idx] };
+      })()
+    `).catch(e => ({ ok: false, reason: e.message })),
+    r => !r.ok || r.value?.ready,
+    5000,
+  );
+  if (!pick.ok || !pick.value?.clicked) {
+    const cleanup = await closeTargetViaShell(launcher, () => evaluateOnTarget(launcher, 'document.visibilityState').then(r => r.value).catch(() => null));
+    return {
+      success: false,
+      error: pick.value?.reason || pick.reason || 'launcher_not_ready',
+      visible_layouts: pick.value?.visible_layouts,
+      launcher_closed: cleanup.success,
+      hint: 'The launcher only lists recent/favorite layouts. For any other layout: tab_new (no args), tab_switch to it, then layout_switch.',
+    };
+  }
+
+  const after = await poll(list, s => diffNewTabs(beforeIds, s.tabs).length > 0, 10000);
+  const added = diffNewTabs(beforeIds, after.tabs);
+  if (!added.length) {
+    return { success: false, error: 'no new chart tab appeared', picked: pick.value.picked, tabs_before: before.tab_count, tabs_after: after.tab_count };
+  }
+  const tab = added[0];
+  return {
+    success: true,
+    action: 'new_tab_opened',
+    picked: pick.value.picked,
+    tab_id: tab.id,
+    chart_id: tab.chart_id,
+    url: tab.url,
+    tabs_before: before.tab_count,
+    tabs_after: after.tab_count,
+    note: 'The CDP session is still attached to the previous tab; call tab_switch with this tab_id to operate on it.',
+  };
+}
+
+/**
+ * Close the tab the CDP session is attached to. Cmd/Ctrl+W is a no-op on
+ * current Desktop builds (same main-process-accelerator problem as Cmd+T).
  */
 export async function closeTab() {
   const before = await list();
   if (before.tab_count <= 1) {
     throw new Error('Cannot close the last tab. Use tv_launch to restart TradingView instead.');
   }
+  const current = await getTargetInfo();
+  if (!current?.id) throw new Error('No attached chart tab to close.');
 
-  const c = await getClient();
-  const isMac = process.platform === 'darwin';
-  const mod = isMac ? 4 : 2;
-
-  await c.Input.dispatchKeyEvent({
-    type: 'keyDown',
-    modifiers: mod,
-    key: 'w',
-    code: 'KeyW',
-    windowsVirtualKeyCode: 87,
-  });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'w', code: 'KeyW' });
-
-  await new Promise(r => setTimeout(r, 1000));
-
+  const closed = await closeTargetViaShell(current, () => evaluate('document.visibilityState').catch(() => null));
+  if (!closed.success) return { ...closed, tab_id: current.id, tabs_before: before.tab_count };
   const after = await list();
-  return { success: true, action: 'tab_closed', tabs_before: before.tab_count, tabs_after: after.tab_count };
+  return {
+    success: true,
+    action: 'tab_closed',
+    tab_id: current.id,
+    chart_id: before.tabs.find(t => t.id === current.id)?.chart_id ?? null,
+    tabs_before: before.tab_count,
+    tabs_after: after.tab_count,
+    note: 'The CDP session reattaches to the default chart tab on the next call; use tab_switch to pick one explicitly.',
+  };
 }
 
 /**
